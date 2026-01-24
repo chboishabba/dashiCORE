@@ -8,6 +8,7 @@ These tests assert that GPU adapters/backends stay outside `dashi_core/`, enforc
 - `test_vulkan_sign_flip.py` runs a non-trivial sign-flip shader, asserts parity/idempotence, and preserves support.
 - `test_vulkan_two_pass.py` composes two GPU dispatches (flip then clamp) to validate ordering and determinism.
 - `test_vulkan_repeatability.py` stresses determinism by running the sign-flip shader many times and asserting identical outputs.
+- PQ tests live under `tests/pq/` and cover encode/decode roundtrips and sizing; kernels remain dense-only.
 
 The sample shader `gpu_shaders/carrier_passthrough.comp` matches the storage-buffer layout expected by `gpu_vulkan_dispatcher.py`. When running on a GPU, build it with `glslc gpu_shaders/carrier_passthrough.comp -o gpu_shaders/carrier_passthrough.spv` and pass those paths into `VulkanKernelConfig`.
 

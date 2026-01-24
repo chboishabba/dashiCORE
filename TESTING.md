@@ -346,6 +346,13 @@ cpu_impl(x) == backend_impl(x)
 
 GPU scaffolding lives under `tests/gpu/` and covers adapter/registry wiring with deterministic fallbacks while enforcing the same Carrier invariants.
 
+### 7.3 Kernel partitioning and parallel safety (new)
+
+- **Disjoint partition equivalence:** Split input into blocks, run kernel per-block, recombine; must match monolithic kernel output.
+- **Halo/stencil partition equivalence:** Split with halo, crop cores, recombine; must match monolithic output.
+- **Scheduling invariance:** Randomise block execution order; recombined output must stay identical.
+- **Repeatability stress:** Many repeated runs of the same kernel yield identical outputs (already implemented).
+
 ---
 
 ## 8. Forbidden Failure Modes (Tests MUST Catch)
