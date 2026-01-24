@@ -21,3 +21,4 @@
 - [ ] Add CLI flags to `bench.py` to restrict Vulkan suite to CPU-only or GPU-only modes for quicker smoke runs.
 - [ ] Add Observation/StateFingerprint parity tests (CPU vs Vulkan hash reduction) and forbid using observation outputs in kernel/defect logic.
 - [ ] Wire Vulkan VkFFT binding (pybind11 bridge to DTolm/VkFFT) into `VkFFTExecutor` and add a guarded smoke test; keep NumPy fallback when probe fails.
+- [ ] Fix Vulkan VkFFT accuracy: current smoke (`scripts/run_fft_smoke.py --fft-backend vkfft-vulkan` with RADV ICD) produces `~2.68e5` max error on 256×256 complex64; diagnose buffer layout/plan config and add a regression test once corrected.
