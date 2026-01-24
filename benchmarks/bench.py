@@ -21,6 +21,8 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+if str(Path(__file__).parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).parent))
 
 from dashi_core.carrier import Carrier  # noqa: E402
 from dashi_core.kernel import Kernel  # noqa: E402
@@ -29,6 +31,7 @@ from pq import decode_pq_to_carrier, encode_carrier_to_pq  # noqa: E402
 from gpu_common_methods import compile_shader  # noqa: E402
 from gpu_vulkan_backend import make_vulkan_kernel, register_vulkan_backend, VulkanKernelConfig  # noqa: E402
 from gpu_vulkan_dispatcher import VulkanDispatchConfig  # noqa: E402
+import workloads  # noqa: E402
 
 
 def _now_ms() -> float:
@@ -39,11 +42,8 @@ def _hash_array(arr: np.ndarray) -> str:
     return str(np.int64(np.sum(arr.astype(np.int64) * 31)) % (10**12))
 
 
-def _make_carrier(n: int, sparsity: float, seed: int) -> Carrier:
-    rng = np.random.default_rng(seed)
-    probs = [sparsity, (1 - sparsity) / 2, (1 - sparsity) / 2]
-    vals = rng.choice([0, -1, 1], size=n, p=probs).astype(np.int8)
-    return Carrier.from_signed(vals)
+def _make_carrier(n: int, sparsity: float, seed: int, workload: str) -> Carrier:
+    return workloads.make(workload, n, sparsity, seed)
 
 
 class SignFlipKernel(Kernel):
@@ -59,6 +59,7 @@ class BenchResult:
     backend: str
     size: int
     sparsity: float
+    batch_count: int
     block_elems: Optional[int]
     device: Optional[str]
     run: int
@@ -75,12 +76,12 @@ class BenchResult:
         return json.dumps(asdict(self), sort_keys=True)
 
 
-def bench_pq_roundtrip(sizes: Sequence[int], sparsities: Sequence[float], repeats: int, seed: int, out: Path):
+def bench_pq_roundtrip(sizes: Sequence[int], sparsities: Sequence[float], repeats: int, seed: int, out: Path, workload: str):
     results: List[str] = []
     meta = {"cpu": cpu_cache_info()}
     for size in sizes:
         for sparsity in sparsities:
-            carrier = _make_carrier(size, sparsity, seed)
+            carrier = _make_carrier(size, sparsity, seed, workload)
             ref_hash = _hash_array(carrier.to_signed())
             for run in range(repeats):
                 start = _now_ms()
@@ -96,6 +97,7 @@ def bench_pq_roundtrip(sizes: Sequence[int], sparsities: Sequence[float], repeat
                     backend="cpu",
                     size=size,
                     sparsity=sparsity,
+                    batch_count=1,
                     block_elems=None,
                     device=None,
                     run=run,
@@ -112,13 +114,20 @@ def bench_pq_roundtrip(sizes: Sequence[int], sparsities: Sequence[float], repeat
     _emit(out, results)
 
 
-def bench_kernel_dense_vs_pq(sizes: Sequence[int], sparsities: Sequence[float], repeats: int, seed: int, out: Path):
+def bench_kernel_dense_vs_pq(
+    sizes: Sequence[int],
+    sparsities: Sequence[float],
+    repeats: int,
+    seed: int,
+    workload: str,
+    out: Path,
+):
     results: List[str] = []
     meta = {"cpu": cpu_cache_info()}
     kernel = SignFlipKernel()
     for size in sizes:
         for sparsity in sparsities:
-            carrier = _make_carrier(size, sparsity, seed)
+            carrier = _make_carrier(size, sparsity, seed, workload)
             ref_start = _now_ms()
             ref_out = kernel(carrier)
             ref_time = _now_ms() - ref_start
@@ -147,6 +156,7 @@ def bench_kernel_dense_vs_pq(sizes: Sequence[int], sparsities: Sequence[float], 
                     backend="cpu",
                     size=size,
                     sparsity=sparsity,
+                    batch_count=1,
                     block_elems=None,
                     device=None,
                     run=run,
@@ -165,6 +175,7 @@ def bench_kernel_dense_vs_pq(sizes: Sequence[int], sparsities: Sequence[float], 
                     backend="cpu",
                     size=size,
                     sparsity=sparsity,
+                    batch_count=1,
                     block_elems=None,
                     device=None,
                     run=run,
@@ -213,6 +224,7 @@ def bench_pq_block_sweep(
     blocks: Sequence[int],
     repeats: int,
     seed: int,
+    workload: str,
     out: Path,
 ):
     results: List[str] = []
@@ -220,7 +232,7 @@ def bench_pq_block_sweep(
     kernel = SignFlipKernel()
     for size in sizes:
         for sparsity in sparsities:
-            carrier = _make_carrier(size, sparsity, seed)
+            carrier = _make_carrier(size, sparsity, seed, workload)
             ref_out = kernel(carrier)
             ref_hash = _hash_array(ref_out.to_signed())
             for block_elems in blocks:
@@ -231,15 +243,16 @@ def bench_pq_block_sweep(
                         suite="pq_block_sweep",
                         mode="pq_block",
                         backend="cpu",
-                    size=size,
-                    sparsity=sparsity,
-                    block_elems=block_elems,
-                    device=None,
-                    run=run,
-                    t_encode_ms=t_enc,
-                    t_kernel_ms=t_ker,
-                    t_decode_ms=t_dec,
-                    t_total_ms=t_enc + t_dec + t_ker,
+                        size=size,
+                        sparsity=sparsity,
+                        batch_count=1,
+                        block_elems=block_elems,
+                        device=None,
+                        run=run,
+                        t_encode_ms=t_enc,
+                        t_kernel_ms=t_ker,
+                        t_decode_ms=t_dec,
+                        t_total_ms=t_enc + t_dec + t_ker,
                         hash_out=pq_hash,
                         hash_ref=ref_hash,
                         match=bool(pq_hash == ref_hash),
@@ -291,6 +304,9 @@ def bench_kernel_dense_vulkan(
     sparsities: Sequence[float],
     repeats: int,
     seed: int,
+    batches: Sequence[int],
+    iterations: int,
+    workload: str,
     out: Path,
     *,
     shader: Path,
@@ -299,7 +315,7 @@ def bench_kernel_dense_vulkan(
 ):
     """Benchmark dense Vulkan kernel (sign-flip) vs dense CPU reference."""
     results: List[str] = []
-    meta = {"cpu": cpu_cache_info(), "vulkan": _vulkan_device_info(device_index)}
+    meta = {"cpu": cpu_cache_info(), "vulkan": _vulkan_device_info(device_index), "iterations": iterations, "workload": workload}
     try:
         import vulkan as vk  # noqa: F401
     except ImportError as exc:
@@ -321,54 +337,63 @@ def bench_kernel_dense_vulkan(
 
     for size in sizes:
         for sparsity in sparsities:
-            carrier = _make_carrier(size, sparsity, seed)
-            ref_start = _now_ms()
-            ref_out = ref_kernel(carrier)
-            ref_time = _now_ms() - ref_start
-            ref_hash = _hash_array(ref_out.to_signed())
-            for run in range(repeats):
-                start = _now_ms()
-                vk_out = kernel(carrier)
-                t_kernel = _now_ms() - start
-                vk_hash = _hash_array(vk_out.to_signed())
-                res = BenchResult(
-                    suite="kernel_dense_vulkan",
-                    mode="vulkan_dense",
-                    backend="vulkan",
-                    size=size,
-                    sparsity=sparsity,
-                    block_elems=None,
-                    device=meta["vulkan"]["device_name"] if meta["vulkan"] else None,
-                    run=run,
-                    t_encode_ms=0.0,
-                    t_kernel_ms=t_kernel,
-                    t_decode_ms=0.0,
-                    t_total_ms=t_kernel,
-                    hash_out=vk_hash,
-                    hash_ref=ref_hash,
-                    match=bool(vk_hash == ref_hash),
+            carrier = _make_carrier(size, sparsity, seed, workload)
+            for batch_count in batches:
+                ref_start = _now_ms()
+                ref_out = None
+                for _ in range(batch_count):
+                    for _ in range(iterations):
+                        ref_out = ref_kernel(carrier)
+                ref_time = _now_ms() - ref_start
+                ref_hash = _hash_array(ref_out.to_signed()) if ref_out is not None else ""
+                for run in range(repeats):
+                    start = _now_ms()
+                    vk_out = None
+                    for _ in range(batch_count):
+                        for _ in range(iterations):
+                            vk_out = kernel(carrier)
+                    t_kernel = _now_ms() - start
+                    vk_hash = _hash_array(vk_out.to_signed()) if vk_out is not None else ""
+                    res = BenchResult(
+                        suite="kernel_dense_vulkan",
+                        mode="vulkan_dense",
+                        backend="vulkan",
+                        size=size,
+                        sparsity=sparsity,
+                        batch_count=batch_count,
+                        block_elems=None,
+                        device=meta["vulkan"]["device_name"] if meta["vulkan"] else None,
+                        run=run,
+                        t_encode_ms=0.0,
+                        t_kernel_ms=t_kernel,
+                        t_decode_ms=0.0,
+                        t_total_ms=t_kernel,
+                        hash_out=vk_hash,
+                        hash_ref=ref_hash,
+                        match=bool(vk_hash == ref_hash),
                     meta=meta,
                 )
-                res_ref = BenchResult(
-                    suite="kernel_dense_vulkan",
-                    mode="cpu_dense_ref",
-                    backend="cpu",
-                    size=size,
-                    sparsity=sparsity,
-                    block_elems=None,
-                    device=None,
-                    run=run,
-                    t_encode_ms=0.0,
-                    t_kernel_ms=ref_time,
-                    t_decode_ms=0.0,
-                    t_total_ms=ref_time,
-                    hash_out=ref_hash,
-                    hash_ref=ref_hash,
-                    match=True,
-                    meta=meta,
-                )
-                results.append(res_ref.to_json())
-                results.append(res.to_json())
+                    res_ref = BenchResult(
+                        suite="kernel_dense_vulkan",
+                        mode="cpu_dense_ref",
+                        backend="cpu",
+                        size=size,
+                        sparsity=sparsity,
+                        batch_count=batch_count,
+                        block_elems=None,
+                        device=None,
+                        run=run,
+                        t_encode_ms=0.0,
+                        t_kernel_ms=ref_time,
+                        t_decode_ms=0.0,
+                        t_total_ms=ref_time,
+                        hash_out=ref_hash,
+                        hash_ref=ref_hash,
+                        match=True,
+                        meta=meta,
+                    )
+                    results.append(res_ref.to_json())
+                    results.append(res.to_json())
     _emit(out, results)
 
 
@@ -402,10 +427,13 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p.add_argument("--repeats", type=int, default=3)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--out", type=Path, default=None)
+    p.add_argument("--workload", type=str, default="random_sparse", choices=list(workloads.names()))
     # Vulkan options
     p.add_argument("--shader", type=Path, default=ROOT / "gpu_shaders" / "sign_flip.comp")
     p.add_argument("--spv", type=Path, default=None, help="Optional SPIR-V output path; defaults beside shader.")
     p.add_argument("--device-index", type=int, default=0)
+    p.add_argument("--batches", type=int, nargs="+", default=[1], help="Repeat kernel N times per timing (amortize dispatch).")
+    p.add_argument("--iterations", type=int, default=1, help="Number of times to apply the kernel per batch (increase intensity).")
     return p.parse_args(argv)
 
 
@@ -431,20 +459,23 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     args = parse_args(argv)
     out = _timestamped_path(args.out, args.suite)
     if args.suite == "pq_roundtrip":
-        bench_pq_roundtrip(args.sizes, args.sparsity, args.repeats, args.seed, out)
+        bench_pq_roundtrip(args.sizes, args.sparsity, args.repeats, args.seed, out, args.workload)
     elif args.suite == "kernel_dense_vs_pq":
-        bench_kernel_dense_vs_pq(args.sizes, args.sparsity, args.repeats, args.seed, out)
+        bench_kernel_dense_vs_pq(args.sizes, args.sparsity, args.repeats, args.seed, args.workload, out)
     elif args.suite == "pq_block_sweep":
         blocks = _parse_blocks(args.blocks)
         if not blocks:
             blocks = recommend_pq_block_elems()
-        bench_pq_block_sweep(args.sizes, args.sparsity, blocks, args.repeats, args.seed, out)
+        bench_pq_block_sweep(args.sizes, args.sparsity, blocks, args.repeats, args.seed, args.workload, out)
     elif args.suite == "kernel_dense_vulkan":
         bench_kernel_dense_vulkan(
             args.sizes,
             args.sparsity,
             args.repeats,
             args.seed,
+            args.batches,
+            args.iterations,
+            args.workload,
             out,
             shader=args.shader,
             spv=args.spv,

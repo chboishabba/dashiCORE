@@ -281,6 +281,22 @@ Dense Vulkan vs CPU reference (medians, ms):
 
 All runs matched hashes (parity OK). Vulkan setup: RX 580 with RADV ICD (`VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/radeon_icd.x86_64.json`); SPIR-V built from `gpu_shaders/sign_flip.comp`.
 
+Batch sweep (medians, ms) — dispatch repeated 1×/4×/8× per timing:
+
+| size | sparsity | CPU 1× | CPU 4× | CPU 8× | Vulkan 1× | Vulkan 4× | Vulkan 8× |
+| ---- | -------- | ------ | ------ | ------ | --------- | ---------- | ---------- |
+| 1,024 | 0.0 | 0.19 | 0.51 | 1.56 | 7.49 | 25.98 | 51.96 |
+| 1,024 | 0.5 | 0.30 | 1.16 | 1.45 | 6.17 | 30.95 | 59.47 |
+| 1,024 | 0.9 | 0.24 | 0.93 | 1.39 | 6.73 | 23.59 | 54.18 |
+| 16,384 | 0.0 | 0.41 | 1.22 | 2.11 | 8.39 | 29.67 | 54.48 |
+| 16,384 | 0.5 | 1.24 | 3.49 | 8.27 | 9.06 | 33.03 | 66.73 |
+| 16,384 | 0.9 | 0.44 | 1.81 | 4.04 | 7.19 | 32.68 | 64.48 |
+| 65,536 | 0.0 | 0.68 | 2.72 | 7.00 | 10.65 | 39.59 | 79.73 |
+| 65,536 | 0.5 | 4.38 | 17.07 | 23.97 | 13.24 | 53.85 | 110.68 |
+| 65,536 | 0.9 | 1.39 | 8.74 | 13.43 | 11.01 | 45.88 | 89.07 |
+
+Even with batching, the RX 580 remained slower than the i7-7700K on this light kernel; batching scales roughly linearly and does not close the gap for these sizes.
+
 Run examples:
 ```
 python benchmarks/bench.py --suite pq_roundtrip --sizes 1024 16384 65536 --sparsity 0.0 0.5 0.9 --repeats 5 --out benchmarks/results/pq_roundtrip.jsonl
@@ -288,5 +304,26 @@ python benchmarks/bench.py --suite kernel_dense_vs_pq --sizes 1024 16384 65536 -
 python benchmarks/bench.py --suite pq_block_sweep --sizes 1024 16384 65536 --sparsity 0.0 0.5 0.9 --blocks auto --repeats 3 --out benchmarks/results/pq_block_sweep.jsonl
 export VK_ICD_FILENAMES=/path/to/radeon_icd.x86_64.json
 glslc gpu_shaders/sign_flip.comp -o /tmp/sign_flip.spv
-python benchmarks/bench.py --suite kernel_dense_vulkan --sizes 1024 16384 65536 --sparsity 0.0 0.5 0.9 --shader gpu_shaders/sign_flip.comp --spv /tmp/sign_flip.spv --device-index 0 --repeats 5 --out benchmarks/results/kernel_dense_vulkan.jsonl
+python benchmarks/bench.py --suite kernel_dense_vulkan --sizes 1024 16384 65536 --sparsity 0.0 0.5 0.9 --workload stencil_dense_iterated --iterations 10 --batches 1 4 8 --shader gpu_shaders/sign_flip.comp --spv /tmp/sign_flip.spv --device-index 0 --repeats 5 --out benchmarks/results/kernel_dense_vulkan.jsonl
 ```
+
+Benchmark planning assets:
+- Workload families and default axes: `benchmarks/workloads.py`
+- Function coverage map: `benchmarks/coverage.yaml`
+- Coverage guard: `python benchmarks/check_coverage.py`
+
+### Backend notes (CPU vs GPU)
+
+- These RX 580 runs confirm: for small/light kernels, Vulkan dispatch/transfer overhead dominates; batching amortizes linearly and does not overturn CPU > GPU on this hardware. This is expected and acceptable for dashiCORE, whose priority is semantic parity, not early GPU speedups.
+- Guideline: if a GPU backend is slower than CPU for a given kernel, treat it as a performance observation, not a correctness failure. Use CPU as the semantic reference; expect GPU wins only for sufficiently large/dense workloads where overhead is amortized.
+- For a GPU-favored regime, use dense, iterated workloads (e.g., `--workload stencil_dense_iterated --iterations 10+` on large sizes) to increase arithmetic intensity while keeping semantics identical.
+
+Latest dense, iterated sweep (RX 580, `stencil_dense_iterated`, `iterations=10`, `batches=4`, sparsity 0.0; medians, ms):
+
+| size    | CPU | Vulkan |
+| ------: | --: | -----: |
+| 16,384  | 17.15 | 304.10 |
+| 65,536  | 32.48 | 410.23 |
+| 262,144 | 122.13 | 853.85 |
+
+Parity remains perfect (hashes match); even at higher intensity the RX 580 stays slower than the i7-7700K. Treat this as a performance observation; correctness is validated.

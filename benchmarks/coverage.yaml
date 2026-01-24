@@ -1,0 +1,68 @@
+modules:
+  dashi_core.carrier:
+    Carrier.from_signed:
+      workloads: [pointwise_small, pointwise_large]
+      axes: [N, sparsity, pattern]
+      correctness: [roundtrip_hash]
+    Carrier.to_signed:
+      workloads: [pointwise_small, pointwise_large]
+      axes: [N, sparsity]
+      correctness: [roundtrip_hash]
+
+  dashi_core.kernel:
+    Kernel.__call__:
+      workloads: [pipeline_1pass, pipeline_multipass, stencil_dense_iterated]
+      axes: [N, passes, sparsity, pattern]
+      correctness: [parity_cpu_gpu]
+
+  dashi_core.defect:
+    local:
+      workloads: [pair_random, pair_adversarial]
+      axes: [N, sparsity, pattern]
+      correctness: [parity_cpu_gpu]
+    aggregate:
+      workloads: [reductions_small, reductions_large]
+      axes: [N]
+      correctness: [parity_cpu_gpu]
+
+  dashi_core.admissibility:
+    apply:
+      workloads: [admissibility_projection]
+      axes: [N, sparsity]
+      correctness: [parity_cpu_gpu]
+
+  dashi_core.mdl:
+    score:
+      workloads: [mdl_random, mdl_structured]
+      axes: [N]
+      correctness: [parity_cpu_gpu]
+    compare:
+      workloads: [mdl_random, mdl_structured]
+      axes: [N]
+      correctness: [parity_cpu_gpu]
+
+  dashi_core.adapters:
+    from_carrier:
+      workloads: [adapter_roundtrip]
+      axes: [N, sparsity]
+      correctness: [roundtrip_hash]
+    to_carrier:
+      workloads: [adapter_roundtrip]
+      axes: [N, sparsity]
+      correctness: [roundtrip_hash]
+
+exports:
+  - AdmissibilityTransform
+  - apply_admissibility
+  - aggregate
+  - Carrier
+  - compare
+  - equivalent
+  - is_zero
+  - legacy_from_carrier
+  - legacy_to_carrier
+  - Kernel
+  - lift
+  - local
+  - project
+  - score
