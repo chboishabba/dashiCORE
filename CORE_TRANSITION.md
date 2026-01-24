@@ -55,4 +55,15 @@ This note captures how we already exercise GPUs across the repo and how to apply
 - Test device note: a Vulkan-capable GPU is available for validation here; set `VK_ICD_FILENAMES` accordingly and run `python scripts/run_vulkan_core_mask.py` or `python scripts/run_vulkan_passthrough.py` to exercise the path.
 - FFT placeholder: `gpu_vkfft_stub.py` provides `fft2/ifft2/has_vkfft` that fall back to NumPy with a warning when vkFFT bindings are absent; swap to real vkFFT when bindings are available on the target GPU.
 - Majority fusion shader: `gpu_shaders/core_mask_majority.comp` (+ `.spv`) implements K-channel majority vote on ternary carriers (channel-major layout, push constants `n` and `k`, tie → support=0). Compile via `glslc gpu_shaders/core_mask_majority.comp -o gpu_shaders/core_mask_majority.spv`.
-- ICD probing: when `VK_ICD_FILENAMES` is unset, a robust loop is `for icd in /usr/share/vulkan/icd.d/*.json /etc/vulkan/icd.d/*.json; do [ -f \"$icd\" ] && VK_ICD_FILENAMES=\"$icd\" python scripts/run_vulkan_core_mask.py && break; done`.
+- ICD probing + parity run: when `VK_ICD_FILENAMES` is unset, a robust loop is:
+  ```
+  for icd in /usr/share/vulkan/icd.d/*.json /etc/vulkan/icd.d/*.json; do
+    [ -f "$icd" ] || continue
+    echo "== trying $icd =="
+    VK_ICD_FILENAMES="$icd" python scripts/run_vulkan_core_mask.py && break
+  done
+  ```
+  This iterates ICD JSONs until the Vulkan mask parity test succeeds.
+- Shader rebuild: after editing `gpu_shaders/core_mask_majority.comp`, rebuild with
+  `glslc gpu_shaders/core_mask_majority.comp -o gpu_shaders/core_mask_majority.spv`.
+- Current GPU backend status: `accelerated` is CPU-only; Vulkan hooks exist but are not wired into any v4 pipeline in this repo. To actually use GPU masks/FFTs, we need functional GPU kernels and to plumb `dashi_core.backend` into encode_proxy/mask ops. Once a real GPU backend is available, add a `--backend {cpu,vk}` flag in the runner and wrap masking in `with use_backend("vulkan_core_mask"):` to route through Vulkan.
