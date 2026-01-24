@@ -1,10 +1,10 @@
 """
-Optional vkFFT executor with two backends:
-- pyvkfft (OpenCL/CUDA) when available; no Vulkan handles needed.
+Optional vkFFT executor with selectable backends:
+- pyvkfft OpenCL when available; no Vulkan handles needed.
 - Vulkan-bound vkFFT when provided handles are passed in.
 Design notes:
 - Plans are cached by (shape, dtype, direction, device) and reuse buffers (Vulkan path).
-- Opt-in via fft_backend="vkfft"; default is pure NumPy. No implicit handle creation.
+- Opt-in via fft_backend in {"vkfft", "vkfft-opencl", "vkfft-vulkan"}; default is pure NumPy.
 - On missing vkFFT bindings or any binding failure, emits a single warning and falls back to NumPy.
 """
 
@@ -12,7 +12,8 @@ from __future__ import annotations
 
 import warnings
 from dataclasses import dataclass
-from typing import Dict, Optional, Tuple
+from multiprocessing import Process, Queue
+from typing import Dict, Iterable, Optional, Tuple, Any
 
 import numpy as np
 
@@ -34,15 +35,62 @@ try:  # Optional dependency; present only when vkFFT Python bindings are install
 except Exception:  # pragma: no cover - executed only when vkFFT is missing
     vkfft = None  # type: ignore
 
-try:  # Optional dependency; OpenCL/CUDA wrapper around VkFFT.
-    from pyvkfft import VkFFTApp as PyVkFFTApp  # type: ignore
+try:  # Optional dependency; pybind11 Vulkan bridge built from DTolm/VkFFT.
+    import vkfft_vulkan_py  # type: ignore
+except Exception:  # pragma: no cover - executed only when module is missing
+    vkfft_vulkan_py = None  # type: ignore
+
+try:  # Optional dependency; OpenCL wrapper around VkFFT.
+    from pyvkfft.opencl import VkFFTApp as OpenCLVkFFTApp  # type: ignore
 except Exception:  # pragma: no cover - executed only when pyvkfft is missing
-    PyVkFFTApp = None  # type: ignore
+    OpenCLVkFFTApp = None  # type: ignore
 
 
 def has_vkfft() -> bool:
     """Return True if any VkFFT binding (pyvkfft or vulkan vkfft) is importable."""
-    return vkfft is not None or PyVkFFTApp is not None
+    return vkfft is not None or vkfft_vulkan_py is not None or OpenCLVkFFTApp is not None
+
+
+_pyvkfft_probe_ran = False
+_pyvkfft_safe = False
+
+
+def _probe_pyvkfft_safe(timeout: float = 5.0) -> bool:
+    """
+    Probe pyvkfft/OpenCL in a subprocess so driver crashes don't take down the
+    main process. Returns True only if a tiny fft/ifft succeeds.
+    """
+
+    def _worker(q: Queue) -> None:
+        try:
+            import numpy as _np
+            import pyopencl as _cl
+            from pyvkfft.opencl import VkFFTApp as _App  # type: ignore
+
+            ctx = _cl.create_some_context(interactive=False)
+            queue = _cl.CommandQueue(ctx)
+            x = _np.zeros((8, 8), dtype=_np.complex64)
+            buf = _cl.Buffer(
+                ctx, _cl.mem_flags.READ_WRITE | _cl.mem_flags.COPY_HOST_PTR, hostbuf=x
+            )
+            app = _App(x.shape, x.dtype, queue=queue)
+            app.fft(buf)
+            app.ifft(buf)
+            _cl.enqueue_copy(queue, x, buf).wait()
+            q.put(True)
+        except Exception:
+            q.put(False)
+
+    q: Queue = Queue()
+    p = Process(target=_worker, args=(q,), daemon=True)
+    p.start()
+    p.join(timeout)
+    if p.is_alive():
+        p.kill()
+        return False
+    if p.exitcode != 0:
+        return False
+    return not q.empty() and bool(q.get())
 
 
 @dataclass(frozen=True)
@@ -79,26 +127,32 @@ class VkFFTExecutor:
         """
         Args:
             handles: Shared Vulkan handles (device/queue/allocator) to bind vkFFT to.
-            fft_backend: "numpy" (default) or "vkfft". Any other value defaults to "numpy".
+            fft_backend: one of "numpy", "vkfft" (auto), "vkfft-opencl", "vkfft-vulkan".
         """
         self.handles = handles
-        self.fft_backend = fft_backend if fft_backend in ("numpy", "vkfft") else "numpy"
+        self.fft_backend = self._normalize_backend(fft_backend)
         self._plans: Dict[_PlanKey, _PlanCtx] = {}
         self._command_pool = None
         self._warned = False
 
+    def _normalize_backend(self, backend: str) -> str:
+        allowed = {"numpy", "vkfft", "vkfft-opencl", "vkfft-vulkan"}
+        return backend if backend in allowed else "numpy"
+
     # ----------------------------- public API -----------------------------
     def fft2(self, x: np.ndarray) -> np.ndarray:
-        plan = self._get_plan(x, direction="fft")
+        arr = self._coerce_input(x)
+        plan = self._get_plan(arr, direction="fft")
         if plan is None:
-            return np.fft.fft2(x)
-        return self._execute(plan, x, inverse=False)
+            return np.fft.fft2(arr)
+        return self._execute(plan, arr, inverse=False)
 
     def ifft2(self, x: np.ndarray) -> np.ndarray:
-        plan = self._get_plan(x, direction="ifft")
+        arr = self._coerce_input(x)
+        plan = self._get_plan(arr, direction="ifft")
         if plan is None:
-            return np.fft.ifft2(x)
-        return self._execute(plan, x, inverse=True)
+            return np.fft.ifft2(arr)
+        return self._execute(plan, arr, inverse=True)
 
     def close(self) -> None:
         """Release any GPU resources owned by this executor (plans, pools)."""
@@ -116,21 +170,71 @@ class VkFFTExecutor:
             warnings.warn(msg, RuntimeWarning, stacklevel=2)
             self._warned = True
 
+    def _coerce_input(self, x: np.ndarray) -> np.ndarray:
+        arr = np.asarray(x)
+        if self.fft_backend == "numpy":
+            return arr
+        # Vulkan binding assumes complex64; promote real or higher-precision complex to complex64.
+        if not np.iscomplexobj(arr) or arr.dtype not in (np.complex64,):
+            return arr.astype(np.complex64, copy=True)
+        return arr
+
+    def _as_u64(self, obj: Any) -> int:
+        """Best-effort conversion of Vulkan cffi handles to integer addresses."""
+        if obj is None:
+            raise ValueError("handle is None")
+        try:
+            return int(obj)
+        except Exception:
+            pass
+        for attr in ("handle", "value"):
+            if hasattr(obj, attr):
+                try:
+                    return int(getattr(obj, attr))
+                except Exception:
+                    continue
+        # cffi pointer from python-vulkan
+        if vk is not None and hasattr(vk, "ffi"):
+            try:
+                return int(vk.ffi.cast("uintptr_t", obj))
+            except Exception:
+                pass
+        raise TypeError("Expected an int-like Vulkan handle (or object with .handle/.value)")
+
     def _can_use_vkfft(self) -> bool:
-        if self.fft_backend != "vkfft":
+        if self.fft_backend == "numpy":
             return False
-        if PyVkFFTApp is not None:
-            return True
-        if vkfft is None:
+
+        # Auto mode prefers Vulkan when handles + binding exist, else OpenCL via pyvkfft.
+        if self.fft_backend == "vkfft":
+            if vkfft_vulkan_py is not None and vk is not None and self.handles is not None:
+                return True
+            if vkfft is not None and vk is not None and self.handles is not None:
+                return True
+            if OpenCLVkFFTApp is not None:
+                return True
             self._warn_once("vkFFT not installed; using NumPy FFT.")
             return False
-        if vk is None:
-            self._warn_once("Vulkan python bindings missing; using NumPy FFT.")
-            return False
-        if self.handles is None:
-            self._warn_once("vkFFT requested but no Vulkan handles provided; using NumPy FFT.")
-            return False
-        return True
+
+        if self.fft_backend == "vkfft-vulkan":
+            if vkfft_vulkan_py is None and vkfft is None:
+                self._warn_once("Vulkan vkFFT binding missing; build vkfft_vulkan_py via setup_vkfft_vulkan.py.")
+                return False
+            if vk is None:
+                self._warn_once("Vulkan python bindings missing; using NumPy FFT.")
+                return False
+            if self.handles is None:
+                self._warn_once("vkFFT/Vulkan requested but no Vulkan handles provided; using NumPy FFT.")
+                return False
+            return True
+
+        if self.fft_backend == "vkfft-opencl":
+            if OpenCLVkFFTApp is None:
+                self._warn_once("pyvkfft (OpenCL) not installed; using NumPy FFT.")
+                return False
+            return True
+
+        return False
 
     def _get_plan(self, arr: np.ndarray, direction: str) -> Optional[_PlanCtx]:
         key = _PlanKey(shape=tuple(arr.shape), dtype=arr.dtype, direction=direction, device_id=self._device_id())
@@ -138,14 +242,29 @@ class VkFFTExecutor:
             return self._plans[key]
         if not self._can_use_vkfft():
             return None
-        if PyVkFFTApp is not None:
-            plan = self._build_pyvkfft_plan(arr, direction, key)
-        else:
-            plan = self._build_vulkan_plan(arr, direction, key)
+
+        plan: Optional[_PlanCtx] = None
+        # Ordering: explicit backend choice; auto prefers Vulkan then OpenCL.
+        backend_order = self._backend_order()
+        for backend in backend_order:
+            if backend == "vulkan":
+                plan = self._build_vulkan_plan(arr, direction, key)
+            elif backend == "pyvkfft":
+                plan = self._build_pyvkfft_plan(arr, direction, key)
+            if plan is not None:
+                break
         if plan is None:
             return None
         self._plans[key] = plan
         return plan
+
+    def _backend_order(self) -> Iterable[str]:
+        if self.fft_backend == "vkfft-vulkan":
+            return ("vulkan",)
+        if self.fft_backend == "vkfft-opencl":
+            return ("pyvkfft",)
+        # auto: prefer Vulkan when handles/binding exist, else OpenCL
+        return ("vulkan", "pyvkfft")
 
     def _build_vulkan_plan(self, arr: np.ndarray, direction: str, key: _PlanKey) -> Optional[_PlanCtx]:
         assert self.handles is not None
@@ -174,17 +293,34 @@ class VkFFTExecutor:
                 HOST_VISIBLE_COHERENT,
             )
 
-            cfg = {
-                "device": self.handles.device,
-                "physical_device": self.handles.physical_device,
-                "queue": self.handles.queue,
-                "queue_family_index": self.handles.queue_family_index,
-                "command_pool": self._ensure_command_pool(),
-                "allocator": self.handles.allocator,
-                "buffer": device_buffer,
-                "scratch_buffer": scratch_buffer,
-            }
-            app = self._create_vkfft_app(arr.shape, arr.dtype, cfg)
+            if vkfft_vulkan_py is not None:
+                buffer_size = plan_bytes = bytes_len
+                scratch_size = bytes_len
+                app = vkfft_vulkan_py.VkFFTPlan(
+                    physical_device=self._as_u64(self.handles.physical_device),
+                    device=self._as_u64(self.handles.device),
+                    queue=self._as_u64(self.handles.queue),
+                    command_pool=self._as_u64(self._ensure_command_pool()),
+                    queue_family_index=int(self.handles.queue_family_index),
+                    buffer_size_bytes=buffer_size,
+                    scratch_size_bytes=scratch_size,
+                    dims=list(arr.shape),
+                    buffer=self._as_u64(device_buffer),
+                    scratch_buffer=self._as_u64(scratch_buffer),
+                    inverse=direction == "ifft",
+                )
+            else:
+                cfg = {
+                    "device": self.handles.device,
+                    "physical_device": self.handles.physical_device,
+                    "queue": self.handles.queue,
+                    "queue_family_index": self.handles.queue_family_index,
+                    "command_pool": self._ensure_command_pool(),
+                    "allocator": self.handles.allocator,
+                    "buffer": device_buffer,
+                    "scratch_buffer": scratch_buffer,
+                }
+                app = self._create_vkfft_app(arr.shape, arr.dtype, cfg)
             return _PlanCtx(
                 key=key,
                 backend="vulkan",
@@ -202,11 +338,36 @@ class VkFFTExecutor:
             return None
 
     def _build_pyvkfft_plan(self, arr: np.ndarray, direction: str, key: _PlanKey) -> Optional[_PlanCtx]:
-        if PyVkFFTApp is None:
+        if OpenCLVkFFTApp is None:
             return None
+        global _pyvkfft_probe_ran, _pyvkfft_safe
+        if not _pyvkfft_probe_ran:
+            _pyvkfft_safe = _probe_pyvkfft_safe()
+            _pyvkfft_probe_ran = True
+            if not _pyvkfft_safe:
+                self._warn_once("pyvkfft (OpenCL) probed and crashed; using NumPy FFT.")
+                return None
         try:
-            app = PyVkFFTApp(shape=arr.shape, dtype=arr.dtype, backend="opencl")  # type: ignore[arg-type]
-            return _PlanCtx(key=key, backend="pyvkfft", app=app, bytes_len=arr.nbytes)
+            import pyopencl as cl  # local import to avoid hard dependency
+            import pyopencl.array as cla
+
+            # Pick first available device; extend later with selection hooks.
+            platforms = cl.get_platforms()
+            devices = [d for p in platforms for d in p.get_devices()]
+            if not devices:
+                raise RuntimeError("no OpenCL devices available")
+            ctx = cl.Context([devices[0]])
+            queue = cl.CommandQueue(ctx)
+
+            cl_arr = cla.to_device(queue, arr)
+            app = OpenCLVkFFTApp(shape=arr.shape, dtype=arr.dtype, queue=queue)  # type: ignore[arg-type]
+            return _PlanCtx(
+                key=key,
+                backend="pyvkfft",
+                app=app,
+                device_buffer=cl_arr,
+                bytes_len=arr.nbytes,
+            )
         except Exception as exc:  # pragma: no cover - exercised only when pyvkfft misbehaves
             self._warn_once(f"pyvkfft binding failed ({exc}); using NumPy FFT.")
             return None
@@ -276,6 +437,9 @@ class VkFFTExecutor:
 
     def _run_vkfft(self, plan: _PlanCtx, *, inverse: bool) -> None:
         app = plan.app
+        if hasattr(app, "exec"):
+            app.exec()
+            return
         # Handle different binding styles:
         # 1) VkFFTApp instance with fft/ifft methods.
         # 2) Module-level fft/ifft callables.
@@ -284,7 +448,7 @@ class VkFFTExecutor:
             calls.append(lambda: app.ifft(plan.device_buffer, plan.device_buffer) if inverse else app.fft(plan.device_buffer, plan.device_buffer))  # type: ignore[misc]
         if hasattr(app, "fft"):
             calls.append(lambda: app.fft(plan.device_buffer, plan.device_buffer, inverse=inverse))  # type: ignore[misc]
-        if hasattr(vkfft, "fft"):
+        if vkfft is not None and hasattr(vkfft, "fft"):
             calls.append(lambda: vkfft.ifft(plan.device_buffer, ndim=2) if inverse else vkfft.fft(plan.device_buffer, ndim=2))  # type: ignore[misc]
         for fn in calls:
             try:
@@ -295,9 +459,23 @@ class VkFFTExecutor:
         raise RuntimeError("vkFFT bindings do not expose a usable fft/ifft call")
 
     def _run_pyvkfft(self, plan: _PlanCtx, arr: np.ndarray, *, inverse: bool) -> np.ndarray:
+        import pyopencl.array as cla
+
+        # Reuse the preallocated device buffer when shapes match; else recreate.
+        cl_arr = plan.device_buffer
+        if cl_arr is None or tuple(cl_arr.shape) != tuple(arr.shape):  # type: ignore[attr-defined]
+            cl_arr = cla.to_device(plan.app.queue, arr)
+            plan.device_buffer = cl_arr
+        else:
+            cl_arr.set(arr)
+
         app = plan.app
         if hasattr(app, "ifft") and hasattr(app, "fft"):
-            return app.ifft(arr) if inverse else app.fft(arr)  # type: ignore[misc]
+            if inverse:
+                app.ifft(cl_arr)
+            else:
+                app.fft(cl_arr)
+            return cl_arr.get()
         raise RuntimeError("pyvkfft VkFFTApp missing fft/ifft")
 
     def _download(self, plan: _PlanCtx, shape: Tuple[int, ...], dtype: np.dtype) -> np.ndarray:

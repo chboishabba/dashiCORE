@@ -30,7 +30,11 @@ from gpu_vulkan_dispatcher import VulkanDispatchConfig, create_vulkan_handles
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="FFT smoke test (NumPy or vkFFT).")
-    p.add_argument("--fft-backend", choices=["numpy", "vkfft"], default="numpy")
+    p.add_argument(
+        "--fft-backend",
+        choices=["numpy", "vkfft", "vkfft-opencl", "vkfft-vulkan"],
+        default="numpy",
+    )
     p.add_argument("--size", type=int, default=256, help="1D length (creates size x size grid).")
     p.add_argument("--device-index", type=int, default=0, help="Vulkan device index when using vkFFT.")
     return p.parse_args()
@@ -39,11 +43,14 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     handles = None
-    if args.fft_backend == "vkfft":
+    if args.fft_backend in {"vkfft", "vkfft-vulkan"}:
         try:
             handles = create_vulkan_handles(VulkanDispatchConfig(device_index=args.device_index))
         except Exception as exc:
-            print(f"[warn] Vulkan handle setup failed ({exc}); will attempt pyvkfft or fall back to NumPy.", file=sys.stderr)
+            print(
+                f"[warn] Vulkan handle setup failed ({exc}); will attempt pyvkfft or fall back to NumPy.",
+                file=sys.stderr,
+            )
 
     executor = VkFFTExecutor(handles=handles, fft_backend=args.fft_backend)
 
@@ -59,15 +66,15 @@ def main() -> None:
             backend = "vkFFT/OpenCL (pyvkfft)"
         elif plan_backend == "vulkan":
             backend = "vkFFT/Vulkan"
-    elif args.fft_backend == "vkfft":
+    elif args.fft_backend.startswith("vkfft"):
         backend = "vkFFT (fallback to NumPy)"
     print(f"backend: {backend}")
     print(f"shape: {x.shape}, dtype: {x.dtype}")
     print(f"max reconstruction error: {max_err:.3e}")
 
+    executor.close()
     if handles is not None:
         handles.close()
-    executor.close()
 
 
 if __name__ == "__main__":
