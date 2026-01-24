@@ -97,6 +97,8 @@ struct PyVkFFTPlan {
         // Build a bidirectional plan to avoid ONLY_FORWARD/ONLY_INVERSE errors.
         cfg.makeForwardPlanOnly = 0;
         cfg.makeInversePlanOnly = 0;
+        // Normalize inverse transform so fft2 -> ifft2 returns the original array.
+        cfg.normalize = 1;
 
         // Create fence for VkFFT internal use.
         VkFenceCreateInfo fci{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
