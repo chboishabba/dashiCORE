@@ -14,5 +14,5 @@
 - [ ] Add flow parity + violation guard tests for graph kernels.
 - [x] Keep GPU adapters outside CORE; plan Vulkan adapter using gpu_common_methods.py (post-Sprint2) — Vulkan adapter scaffold + dispatcher hooks landed.
 - [x] Add dependency manifests (`requirements.txt`, `requirements-dev.txt`) and document install command.
-- [ ] Add PQ vs dense benchmark harness (JSONL output, size/sparsity/backend/block sweeps) and PQ block-size heuristic.
+- [x] Add PQ vs dense benchmark harness (JSONL output, size/sparsity/backend/block sweeps) and PQ block-size heuristic.
 - [ ] Add GPU/CPU kernel partitioning tests (disjoint/halo/scheduling) to lock parallel recomposition semantics.

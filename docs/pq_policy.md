@@ -21,11 +21,12 @@
 ## Benchmark guidance (future work)
 - Benchmark dimensions: size sweep, sparsity sweep, backend (CPU/Vulkan), representation (dense/PQ), block size.
 - Metrics: encode/decode time, kernel time, total time, bytes moved, effective bandwidth, hashes for correctness.
-- Output format: JSONL rows per run for plotting crossover points.
+- Output format: JSONL rows per run for plotting crossover points (see `benchmarks/bench.py` + `benchmarks/README.md`).
 
 ## Current state
 - Implemented: dense kernels and GPU parity tests; PQ encode/decode helpers (`pq.py`) with roundtrip tests (`tests/pq/`).
-- Not implemented yet: PQ-backed GPU buffers, PQ vs dense benchmark harness, automatic PQ block-size selection.
+- Implemented benchmarks: `benchmarks/bench.py` (pq_roundtrip, kernel_dense_vs_pq, pq_block_sweep) + heuristic block sizing (`benchmarks/hardware.py`).
+- Not implemented yet: PQ-backed GPU buffers, Vulkan-side PQ benchmarks/plots.
 
 ## One-sentence summary
 Dense Carrier execution is the canonical baseline in dashiCORE. PQ encoding is maintained as an optional storage/transport optimisation and is evaluated empirically against dense execution; both paths are preserved and PQ is used selectively where benchmarks demonstrate a clear advantage.

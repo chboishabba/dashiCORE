@@ -252,3 +252,41 @@ If something feels clever, it probably doesn’t belong here.
 * PQ is optional and outside kernel semantics: `pq.py` provides 2-bit encode/decode helpers with tests under `tests/pq/`; kernels and adapters operate on dense `Carrier` only. Policy and guidance live in `docs/pq_policy.md`.
 * Tests mirror theory under `tests/` (`carrier/`, `kernel/`, `defect/`, `admissibility/`, `mdl/`, `hierarchy/`, `backend/`, `violations/`, `reproducibility/`); run with `python -m pytest`.
 * Dependencies: install with `python -m pip install -r requirements-dev.txt` (or `requirements.txt` for runtime only); no GPU/Vulkan deps are pulled into CORE.
+
+## Benchmarks (PQ vs dense)
+
+Benchmarks live under `benchmarks/` and emit JSONL (not CI-gating). All outputs are timestamped automatically (`-<suite>-YYYYMMDD-HHMMSS.jsonl`).
+
+### CPU (Intel i7-7700K, sign-flip kernel)
+
+- **PQ roundtrip (encode+decode only):** for 65,536 elements, median ~55–58 ms vs dense copy baseline <1 ms. Packing overhead dominates at these sizes.
+- **Kernel dense vs PQ:** for 65,536 elements, dense median ~0.7–3.0 ms (sparsity 0.0/0.5/0.9) vs PQ roundtrip + kernel ~58–61 ms. Dense path is faster across tested sizes (1k–65k) and sparsities.
+- **PQ block-size sweep:** medians for 65,536 elements span ~55–123 ms depending on block size and sparsity. No block size beat the dense baseline in this sweep.
+
+### GPU (RX 580, Vulkan, sign-flip kernel)
+
+Dense Vulkan vs CPU reference (medians, ms):
+
+| size | sparsity | CPU dense | Vulkan dense |
+| ---- | -------- | --------- | ------------ |
+| 1,024 | 0.0 | ~0.16 | ~6.54 |
+| 1,024 | 0.5 | ~0.17 | ~6.38 |
+| 1,024 | 0.9 | ~0.17 | ~6.07 |
+| 16,384 | 0.0 | ~0.29 | ~8.43 |
+| 16,384 | 0.5 | ~0.93 | ~8.48 |
+| 16,384 | 0.9 | ~0.53 | ~7.78 |
+| 65,536 | 0.0 | ~0.72 | ~9.92 |
+| 65,536 | 0.5 | ~3.04 | ~12.02 |
+| 65,536 | 0.9 | ~1.47 | ~10.32 |
+
+All runs matched hashes (parity OK). Vulkan setup: RX 580 with RADV ICD (`VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/radeon_icd.x86_64.json`); SPIR-V built from `gpu_shaders/sign_flip.comp`.
+
+Run examples:
+```
+python benchmarks/bench.py --suite pq_roundtrip --sizes 1024 16384 65536 --sparsity 0.0 0.5 0.9 --repeats 5 --out benchmarks/results/pq_roundtrip.jsonl
+python benchmarks/bench.py --suite kernel_dense_vs_pq --sizes 1024 16384 65536 --sparsity 0.0 0.5 0.9 --repeats 5 --out benchmarks/results/kernel_dense_vs_pq.jsonl
+python benchmarks/bench.py --suite pq_block_sweep --sizes 1024 16384 65536 --sparsity 0.0 0.5 0.9 --blocks auto --repeats 3 --out benchmarks/results/pq_block_sweep.jsonl
+export VK_ICD_FILENAMES=/path/to/radeon_icd.x86_64.json
+glslc gpu_shaders/sign_flip.comp -o /tmp/sign_flip.spv
+python benchmarks/bench.py --suite kernel_dense_vulkan --sizes 1024 16384 65536 --sparsity 0.0 0.5 0.9 --shader gpu_shaders/sign_flip.comp --spv /tmp/sign_flip.spv --device-index 0 --repeats 5 --out benchmarks/results/kernel_dense_vulkan.jsonl
+```
