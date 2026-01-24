@@ -294,6 +294,12 @@ python -m pip install dist/vkfft_vulkan_py-*.whl
 
 3) Run the smoke test as above. The FFT adapter auto-falls back to NumPy on any probe or runtime error.
 
+### Latest GPU/vkFFT runs (self-reported)
+
+- `run_v4_snapshots.py --N 640 --steps 30 --stride 5 --backend vulkan --fft-backend vkfft-vulkan --dtype float64` (RADV, RX 580, `VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/radeon_icd.x86_64.json`): completed; encode=16.79s, learn=0.029s, rollout≈0, decode_total=0.369s (0.061s/snap). RSS ~600 MB **system RAM**; GPU VRAM was not observed/recorded.
+- `run_v4_snapshots.py --N 1024 --steps 300 --stride 50 --backend vulkan --fft-backend vkfft-vulkan --dtype float64`: aborted in encode due to NaNs (`RuntimeError: Non-finite values in omega before encoding`). Mitigate by reducing `dt`/`Cs` or using smaller `N`.
+- Kernel-only mode still needs a real `--z0-npz` file (keys: `z`, `mask_low`, `anchor_idx`); placeholders will raise `FileNotFoundError`.
+
 ## Benchmarks (PQ vs dense)
 
 Benchmarks live under `benchmarks/` and emit JSONL (not CI-gating). All outputs are timestamped automatically (`-<suite>-YYYYMMDD-HHMMSS.jsonl`).
