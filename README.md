@@ -267,6 +267,33 @@ If something feels clever, it probably doesn’t belong here.
 * Tests mirror theory under `tests/` (`carrier/`, `kernel/`, `defect/`, `admissibility/`, `mdl/`, `hierarchy/`, `backend/`, `violations/`, `reproducibility/`); run with `python -m pytest`.
 * Dependencies: install with `python -m pip install -r requirements-dev.txt` (or `requirements.txt` for runtime only); no GPU/Vulkan deps are pulled into CORE.
 
+## Quickstart (repo-wide usage)
+
+```bash
+python -m venv .venv && source .venv/bin/activate
+python -m pip install -r requirements-dev.txt
+
+# CPU-only tests
+python -m pytest
+
+# Optional: Vulkan FFT smoke (RADV example)
+export VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/radeon_icd.x86_64.json
+python scripts/run_fft_smoke.py --fft-backend vkfft-vulkan
+# Expected parity on RX 580: max reconstruction error ≈ 1e-6 for 256×256 complex64
+```
+
+### Enabling Vulkan VkFFT (optional)
+
+1) Clone VkFFT headers (not vendored): `git clone https://github.com/DTolm/VkFFT.git VkFFT`  
+2) Build the pybind11 bridge (needs Vulkan, glslang, spirv-tools headers/libs):
+
+```bash
+VKFFT_INCLUDE_DIR=VkFFT python setup_vkfft_vulkan.py bdist_wheel
+python -m pip install dist/vkfft_vulkan_py-*.whl
+```
+
+3) Run the smoke test as above. The FFT adapter auto-falls back to NumPy on any probe or runtime error.
+
 ## Benchmarks (PQ vs dense)
 
 Benchmarks live under `benchmarks/` and emit JSONL (not CI-gating). All outputs are timestamped automatically (`-<suite>-YYYYMMDD-HHMMSS.jsonl`).
