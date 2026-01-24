@@ -51,6 +51,70 @@ def _require_vk() -> None:
         raise RuntimeError("vulkan python package not installed; install via `pip install vulkan`")
 
 
+@dataclass
+class VulkanHandles:
+    """Bundle of Vulkan objects that can be shared across dispatchers/backends."""
+
+    instance: object
+    physical_device: object
+    device: object
+    queue: object
+    queue_family_index: int
+    mem_props: object
+    allocator: Optional[object] = None
+    owns_device: bool = True
+    owns_instance: bool = True
+
+    def create_buffer(self, size: int, usage: int, required_flags: int):
+        return _create_buffer(self.device, self.mem_props, size, usage, required_flags)
+
+    def destroy_buffer(self, buffer, memory) -> None:
+        vk.vkDestroyBuffer(self.device, buffer, None)
+        vk.vkFreeMemory(self.device, memory, None)
+
+    def close(self) -> None:
+        if self.device and self.owns_device:
+            vk.vkDestroyDevice(self.device, None)
+        if self.instance and self.owns_instance:
+            vk.vkDestroyInstance(self.instance, None)
+
+
+def create_vulkan_handles(dispatch_config: Optional[VulkanDispatchConfig] = None) -> VulkanHandles:
+    """Create and return shared Vulkan handles according to dispatch config."""
+    _require_vk()
+    cfg = dispatch_config or VulkanDispatchConfig()
+
+    app_info = vk.VkApplicationInfo(
+        sType=vk.VK_STRUCTURE_TYPE_APPLICATION_INFO,
+        pApplicationName="dashiCORE",
+        applicationVersion=vk.VK_MAKE_VERSION(1, 0, 0),
+        pEngineName="dashiCORE",
+        engineVersion=vk.VK_MAKE_VERSION(1, 0, 0),
+        apiVersion=vk.VK_MAKE_VERSION(1, 2, 0),
+    )
+    create_info = vk.VkInstanceCreateInfo(
+        sType=vk.VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
+        pApplicationInfo=app_info,
+    )
+    instance = vk.vkCreateInstance(create_info, None)
+
+    physical_devices = vk.vkEnumeratePhysicalDevices(instance)
+    if not physical_devices:
+        raise RuntimeError("No Vulkan physical devices found")
+    physical_device = physical_devices[cfg.device_index]
+    queue_family_index = _pick_compute_queue_family(physical_device, cfg.queue_family_index)
+    device, queue = _create_device_and_queue(physical_device, queue_family_index)
+    mem_props = vk.vkGetPhysicalDeviceMemoryProperties(physical_device)
+    return VulkanHandles(
+        instance=instance,
+        physical_device=physical_device,
+        device=device,
+        queue=queue,
+        queue_family_index=queue_family_index,
+        mem_props=mem_props,
+    )
+
+
 def _pick_compute_queue_family(physical_device, preferred: Optional[int] = None) -> int:
     queue_families = vk.vkGetPhysicalDeviceQueueFamilyProperties(physical_device)
     if preferred is not None:
@@ -134,6 +198,25 @@ def _ptr_to_int(ptr) -> int:
             raise TypeError("Cannot convert mapped pointer to address")
 
 
+def _create_device_and_queue(physical_device, queue_family_index: int):
+    priorities = [1.0]
+    queue_info = vk.VkDeviceQueueCreateInfo(
+        sType=vk.VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+        queueFamilyIndex=queue_family_index,
+        queueCount=1,
+        pQueuePriorities=priorities,
+    )
+    device_info = vk.VkDeviceCreateInfo(
+        sType=vk.VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
+        queueCreateInfoCount=1,
+        pQueueCreateInfos=[queue_info],
+        pEnabledFeatures=vk.VkPhysicalDeviceFeatures(),
+    )
+    device = vk.vkCreateDevice(physical_device, device_info, None)
+    queue = vk.vkGetDeviceQueue(device, queue_family_index, 0)
+    return device, queue
+
+
 class VulkanCarrierDispatcher:
     """
     Minimal Vulkan compute dispatcher for Carrier tensors.
@@ -142,10 +225,17 @@ class VulkanCarrierDispatcher:
     sign_in (int32), support_in (uint32), sign_out (int32), support_out (uint32).
     """
 
-    def __init__(self, config: VulkanKernelConfig, dispatch_config: Optional[VulkanDispatchConfig] = None):
+    def __init__(
+        self,
+        config: VulkanKernelConfig,
+        dispatch_config: Optional[VulkanDispatchConfig] = None,
+        *,
+        shared_handles: Optional[VulkanHandles] = None,
+    ):
         _require_vk()
         self.config = config
         self.dispatch_config = dispatch_config or VulkanDispatchConfig()
+        self.shared_handles = shared_handles
 
     def __call__(self, carrier: Carrier) -> Carrier:
         return self.dispatch(carrier)
@@ -162,6 +252,7 @@ class VulkanCarrierDispatcher:
         *,
         collect_timing: bool = False,
         hash_only: bool = False,
+        handles: Optional[VulkanHandles] = None,
     ):
         """Record `dispatches` dispatches into one command buffer, submit once, wait once.
 
@@ -171,15 +262,17 @@ class VulkanCarrierDispatcher:
         _require_vk()
         compile_shader(self.config.shader_path, self.config.spv_path)
 
-        instance = self._create_instance()
-        physical_devices = vk.vkEnumeratePhysicalDevices(instance)
-        if not physical_devices:
-            raise RuntimeError("No Vulkan physical devices found")
-        physical_device = physical_devices[self.dispatch_config.device_index]
-        queue_family_index = _pick_compute_queue_family(physical_device, self.dispatch_config.queue_family_index)
+        active_handles: Optional[VulkanHandles] = handles or self.shared_handles
+        owns_handles = active_handles is None
+        if active_handles is None:
+            active_handles = create_vulkan_handles(self.dispatch_config)
 
-        device, queue = self._create_device_and_queue(physical_device, queue_family_index)
-        mem_props = vk.vkGetPhysicalDeviceMemoryProperties(physical_device)
+        device = active_handles.device
+        queue = active_handles.queue
+        mem_props = active_handles.mem_props
+        instance = active_handles.instance
+        physical_device = active_handles.physical_device
+        queue_family_index = active_handles.queue_family_index
 
         sign_in, support_in = self._prepare_inputs(carrier)
         sign_out = np.empty_like(sign_in)
@@ -384,41 +477,8 @@ class VulkanCarrierDispatcher:
                     vk.vkDestroyDescriptorSetLayout(device, h["hash_set_layout"], None)
                 if h.get("hash_shader"):
                     vk.vkDestroyShaderModule(device, h["hash_shader"], None)
-            vk.vkDestroyDevice(device, None)
-            vk.vkDestroyInstance(instance, None)
-
-    def _create_instance(self):
-        app_info = vk.VkApplicationInfo(
-            sType=vk.VK_STRUCTURE_TYPE_APPLICATION_INFO,
-            pApplicationName="dashiCORE",
-            applicationVersion=vk.VK_MAKE_VERSION(1, 0, 0),
-            pEngineName="dashiCORE",
-            engineVersion=vk.VK_MAKE_VERSION(1, 0, 0),
-            apiVersion=vk.VK_MAKE_VERSION(1, 2, 0),
-        )
-        create_info = vk.VkInstanceCreateInfo(
-            sType=vk.VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
-            pApplicationInfo=app_info,
-        )
-        return vk.vkCreateInstance(create_info, None)
-
-    def _create_device_and_queue(self, physical_device, queue_family_index: int):
-        priorities = [1.0]
-        queue_info = vk.VkDeviceQueueCreateInfo(
-            sType=vk.VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
-            queueFamilyIndex=queue_family_index,
-            queueCount=1,
-            pQueuePriorities=priorities,
-        )
-        device_info = vk.VkDeviceCreateInfo(
-            sType=vk.VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
-            queueCreateInfoCount=1,
-            pQueueCreateInfos=[queue_info],
-            pEnabledFeatures=vk.VkPhysicalDeviceFeatures(),
-        )
-        device = vk.vkCreateDevice(physical_device, device_info, None)
-        queue = vk.vkGetDeviceQueue(device, queue_family_index, 0)
-        return device, queue
+            if owns_handles and active_handles is not None:
+                active_handles.close()
 
     def _prepare_inputs(self, carrier: Carrier) -> Tuple[np.ndarray, np.ndarray]:
         sign_in = carrier.sign.astype(np.int32, copy=False)
@@ -936,7 +996,16 @@ class VulkanCarrierDispatcher:
         return _now_ms() - submit_start
 
 
-def build_vulkan_dispatcher(config: VulkanKernelConfig, dispatch_config: Optional[VulkanDispatchConfig] = None) -> DispatchFn:
+def build_vulkan_dispatcher(
+    config: VulkanKernelConfig,
+    dispatch_config: Optional[VulkanDispatchConfig] = None,
+    *,
+    shared_handles: Optional[VulkanHandles] = None,
+) -> DispatchFn:
     """Factory that returns a callable dispatcher for use in VulkanBackendAdapter."""
-    dispatcher = VulkanCarrierDispatcher(config=config, dispatch_config=dispatch_config)
+    dispatcher = VulkanCarrierDispatcher(
+        config=config,
+        dispatch_config=dispatch_config,
+        shared_handles=shared_handles,
+    )
     return dispatcher.dispatch
