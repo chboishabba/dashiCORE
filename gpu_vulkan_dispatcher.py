@@ -1,0 +1,402 @@
+from __future__ import annotations
+
+import ctypes
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Optional, Sequence, Tuple
+
+import numpy as np
+
+from dashi_core.carrier import Carrier
+from gpu_common_methods import compile_shader, find_memory_type
+from gpu_vulkan_adapter import DispatchFn, VulkanKernelConfig
+
+try:
+    import vulkan as vk
+except ImportError:  # pragma: no cover - exercised only when Vulkan is missing
+    vk = None  # type: ignore[assignment]
+
+
+HOST_VISIBLE_COHERENT = (
+    (1 << 1)  # VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
+    | (1 << 2)  # VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+)
+
+
+@dataclass(frozen=True)
+class VulkanDispatchConfig:
+    """Device/queue selection for Vulkan carrier dispatch."""
+
+    device_index: int = 0
+    queue_family_index: Optional[int] = None
+
+
+def _require_vk() -> None:
+    if vk is None:
+        raise RuntimeError("vulkan python package not installed; install via `pip install vulkan`")
+
+
+def _pick_compute_queue_family(physical_device, preferred: Optional[int] = None) -> int:
+    queue_families = vk.vkGetPhysicalDeviceQueueFamilyProperties(physical_device)
+    if preferred is not None:
+        props = queue_families[preferred]
+        if props.queueFlags & vk.VK_QUEUE_COMPUTE_BIT:
+            return preferred
+    for idx, props in enumerate(queue_families):
+        if props.queueFlags & vk.VK_QUEUE_COMPUTE_BIT:
+            return idx
+    raise RuntimeError("No compute-capable queue family found")
+
+
+def _create_buffer(device, mem_props, size: int, usage: int, required_flags: int):
+    buffer_info = vk.VkBufferCreateInfo(
+        sType=vk.VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        size=size,
+        usage=usage,
+        sharingMode=vk.VK_SHARING_MODE_EXCLUSIVE,
+    )
+    buffer = vk.vkCreateBuffer(device, buffer_info, None)
+    mem_req = vk.vkGetBufferMemoryRequirements(device, buffer)
+    mem_type_index = find_memory_type(mem_props, mem_req.memoryTypeBits, required_flags)
+    alloc_info = vk.VkMemoryAllocateInfo(
+        sType=vk.VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+        allocationSize=mem_req.size,
+        memoryTypeIndex=mem_type_index,
+    )
+    memory = vk.vkAllocateMemory(device, alloc_info, None)
+    vk.vkBindBufferMemory(device, buffer, memory, 0)
+    return buffer, memory
+
+
+def _write_buffer(device, memory, data: np.ndarray) -> None:
+    mapped = vk.vkMapMemory(device, memory, 0, data.nbytes, 0)
+    try:
+        data_bytes = data.tobytes()
+        if _try_write_via_buffer(mapped, data_bytes):
+            return
+        addr = _ptr_to_int(mapped)
+        ctypes.memmove(ctypes.c_void_p(addr), data.ctypes.data, data.nbytes)
+    finally:
+        vk.vkUnmapMemory(device, memory)
+
+
+def _read_buffer(device, memory, shape: Sequence[int], dtype: np.dtype) -> np.ndarray:
+    bytes_len = int(np.prod(shape)) * np.dtype(dtype).itemsize
+    mapped = vk.vkMapMemory(device, memory, 0, bytes_len, 0)
+    try:
+        try:
+            mv = memoryview(mapped)
+            return np.frombuffer(mv, dtype=dtype, count=int(np.prod(shape))).reshape(shape).copy()
+        except TypeError:
+            addr = _ptr_to_int(mapped)
+            buf = ctypes.string_at(addr, bytes_len)
+            return np.frombuffer(buf, dtype=dtype).reshape(shape).copy()
+    finally:
+        vk.vkUnmapMemory(device, memory)
+
+
+def _try_write_via_buffer(mapped, data_bytes: bytes) -> bool:
+    try:
+        mv = memoryview(mapped)
+    except TypeError:
+        return False
+    try:
+        mv[: len(data_bytes)] = data_bytes
+        return True
+    except (TypeError, ValueError):
+        return False
+
+
+def _ptr_to_int(ptr) -> int:
+    try:
+        return int(ptr)
+    except (TypeError, ValueError):
+        if isinstance(ptr, bytes):
+            return int.from_bytes(ptr, "little")
+        try:
+            return ctypes.addressof(ctypes.c_char.from_buffer(ptr))
+        except TypeError:
+            raise TypeError("Cannot convert mapped pointer to address")
+
+
+class VulkanCarrierDispatcher:
+    """
+    Minimal Vulkan compute dispatcher for Carrier tensors.
+
+    Uses a storage-buffer GLSL compute shader compiled to SPIR-V. Expects four bindings:
+    sign_in (int32), support_in (uint32), sign_out (int32), support_out (uint32).
+    """
+
+    def __init__(self, config: VulkanKernelConfig, dispatch_config: Optional[VulkanDispatchConfig] = None):
+        _require_vk()
+        self.config = config
+        self.dispatch_config = dispatch_config or VulkanDispatchConfig()
+
+    def __call__(self, carrier: Carrier) -> Carrier:
+        return self.dispatch(carrier)
+
+    def dispatch(self, carrier: Carrier) -> Carrier:
+        _require_vk()
+        compile_shader(self.config.shader_path, self.config.spv_path)
+
+        instance = self._create_instance()
+        physical_devices = vk.vkEnumeratePhysicalDevices(instance)
+        if not physical_devices:
+            raise RuntimeError("No Vulkan physical devices found")
+        physical_device = physical_devices[self.dispatch_config.device_index]
+        queue_family_index = _pick_compute_queue_family(physical_device, self.dispatch_config.queue_family_index)
+
+        device, queue = self._create_device_and_queue(physical_device, queue_family_index)
+        mem_props = vk.vkGetPhysicalDeviceMemoryProperties(physical_device)
+
+        sign_in, support_in = self._prepare_inputs(carrier)
+        sign_out = np.empty_like(sign_in)
+        support_out = np.empty_like(support_in)
+
+        host_flags = HOST_VISIBLE_COHERENT
+        buffer_usage = vk.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+
+        buffers = []
+        memories = []
+        try:
+            for arr in (sign_in, support_in, sign_out, support_out):
+                buffer, memory = _create_buffer(device, mem_props, arr.nbytes, buffer_usage, host_flags)
+                buffers.append(buffer)
+                memories.append(memory)
+
+            _write_buffer(device, memories[0], sign_in)
+            _write_buffer(device, memories[1], support_in)
+
+            descriptor_set_layout, pipeline_layout = self._build_layouts(device)
+            shader_module = self._create_shader_module(device, self.config.spv_path)
+            pipeline = self._create_pipeline(device, pipeline_layout, shader_module)
+            descriptor_pool, descriptor_set = self._allocate_descriptors(device, descriptor_set_layout)
+            self._bind_buffers(device, descriptor_set, buffers, [sign_in, support_in, sign_out, support_out])
+            command_pool, command_buffer = self._build_command_buffer(device, queue_family_index)
+
+            self._record_and_submit(
+                command_buffer,
+                pipeline,
+                pipeline_layout,
+                descriptor_set,
+                queue,
+                global_size=sign_in.shape[0],
+            )
+
+            sign_result = _read_buffer(device, memories[2], sign_out.shape, sign_out.dtype)
+            support_result = _read_buffer(device, memories[3], support_out.shape, support_out.dtype)
+
+            support = support_result.astype(bool)
+            sign = np.asarray(np.sign(sign_result), dtype=np.int8)
+            return Carrier(support=support, sign=sign)
+        finally:
+            # Clean up resources (reverse order of creation where relevant)
+            if 'command_pool' in locals():
+                vk.vkDestroyCommandPool(device, command_pool, None)
+            if 'descriptor_pool' in locals():
+                vk.vkDestroyDescriptorPool(device, descriptor_pool, None)
+            if 'pipeline' in locals():
+                vk.vkDestroyPipeline(device, pipeline, None)
+            if 'pipeline_layout' in locals():
+                vk.vkDestroyPipelineLayout(device, pipeline_layout, None)
+            if 'descriptor_set_layout' in locals():
+                vk.vkDestroyDescriptorSetLayout(device, descriptor_set_layout, None)
+            if 'shader_module' in locals():
+                vk.vkDestroyShaderModule(device, shader_module, None)
+            for buf, mem in zip(buffers[::-1], memories[::-1]):
+                vk.vkDestroyBuffer(device, buf, None)
+                vk.vkFreeMemory(device, mem, None)
+            vk.vkDestroyDevice(device, None)
+            vk.vkDestroyInstance(instance, None)
+
+    def _create_instance(self):
+        app_info = vk.VkApplicationInfo(
+            sType=vk.VK_STRUCTURE_TYPE_APPLICATION_INFO,
+            pApplicationName="dashiCORE",
+            applicationVersion=vk.VK_MAKE_VERSION(1, 0, 0),
+            pEngineName="dashiCORE",
+            engineVersion=vk.VK_MAKE_VERSION(1, 0, 0),
+            apiVersion=vk.VK_MAKE_VERSION(1, 2, 0),
+        )
+        create_info = vk.VkInstanceCreateInfo(
+            sType=vk.VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
+            pApplicationInfo=app_info,
+        )
+        return vk.vkCreateInstance(create_info, None)
+
+    def _create_device_and_queue(self, physical_device, queue_family_index: int):
+        priorities = [1.0]
+        queue_info = vk.VkDeviceQueueCreateInfo(
+            sType=vk.VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+            queueFamilyIndex=queue_family_index,
+            queueCount=1,
+            pQueuePriorities=priorities,
+        )
+        device_info = vk.VkDeviceCreateInfo(
+            sType=vk.VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
+            queueCreateInfoCount=1,
+            pQueueCreateInfos=[queue_info],
+            pEnabledFeatures=vk.VkPhysicalDeviceFeatures(),
+        )
+        device = vk.vkCreateDevice(physical_device, device_info, None)
+        queue = vk.vkGetDeviceQueue(device, queue_family_index, 0)
+        return device, queue
+
+    def _prepare_inputs(self, carrier: Carrier) -> Tuple[np.ndarray, np.ndarray]:
+        sign_in = carrier.sign.astype(np.int32, copy=False)
+        support_in = carrier.support.astype(np.uint32, copy=False)
+        flat_sign = sign_in.reshape(-1)
+        flat_support = support_in.reshape(-1)
+        return flat_sign, flat_support
+
+    def _build_layouts(self, device):
+        bindings = []
+        for binding in range(4):
+            bindings.append(
+                vk.VkDescriptorSetLayoutBinding(
+                    binding=binding,
+                    descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                    descriptorCount=1,
+                    stageFlags=vk.VK_SHADER_STAGE_COMPUTE_BIT,
+                    pImmutableSamplers=None,
+                )
+            )
+        layout_info = vk.VkDescriptorSetLayoutCreateInfo(
+            sType=vk.VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+            bindingCount=len(bindings),
+            pBindings=bindings,
+        )
+        descriptor_set_layout = vk.vkCreateDescriptorSetLayout(device, layout_info, None)
+        pipeline_layout_info = vk.VkPipelineLayoutCreateInfo(
+            sType=vk.VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+            setLayoutCount=1,
+            pSetLayouts=[descriptor_set_layout],
+        )
+        pipeline_layout = vk.vkCreatePipelineLayout(device, pipeline_layout_info, None)
+        return descriptor_set_layout, pipeline_layout
+
+    def _create_shader_module(self, device, spv_path: Path):
+        code_bytes = spv_path.read_bytes()
+        create_info = vk.VkShaderModuleCreateInfo(
+            sType=vk.VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+            codeSize=len(code_bytes),
+            pCode=code_bytes,
+        )
+        return vk.vkCreateShaderModule(device, create_info, None)
+
+    def _create_pipeline(self, device, pipeline_layout, shader_module):
+        stage_info = vk.VkPipelineShaderStageCreateInfo(
+            sType=vk.VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            stage=vk.VK_SHADER_STAGE_COMPUTE_BIT,
+            module=shader_module,
+            pName="main",
+        )
+        pipeline_info = vk.VkComputePipelineCreateInfo(
+            sType=vk.VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+            stage=stage_info,
+            layout=pipeline_layout,
+        )
+        return vk.vkCreateComputePipelines(device, vk.VK_NULL_HANDLE, 1, [pipeline_info], None)[0]
+
+    def _allocate_descriptors(self, device, descriptor_set_layout):
+        pool_sizes = [
+            vk.VkDescriptorPoolSize(
+                type=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                descriptorCount=4,
+            )
+        ]
+        pool_info = vk.VkDescriptorPoolCreateInfo(
+            sType=vk.VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+            poolSizeCount=len(pool_sizes),
+            pPoolSizes=pool_sizes,
+            maxSets=1,
+        )
+        descriptor_pool = vk.vkCreateDescriptorPool(device, pool_info, None)
+        alloc_info = vk.VkDescriptorSetAllocateInfo(
+            sType=vk.VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+            descriptorPool=descriptor_pool,
+            descriptorSetCount=1,
+            pSetLayouts=[descriptor_set_layout],
+        )
+        descriptor_set = vk.vkAllocateDescriptorSets(device, alloc_info)[0]
+        return descriptor_pool, descriptor_set
+
+    def _bind_buffers(self, device, descriptor_set, buffers, arrays):
+        writes = []
+        for binding, (buffer, arr) in enumerate(zip(buffers, arrays)):
+            buffer_info = vk.VkDescriptorBufferInfo(
+                buffer=buffer,
+                offset=0,
+                range=arr.nbytes,
+            )
+            writes.append(
+                vk.VkWriteDescriptorSet(
+                    sType=vk.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                    dstSet=descriptor_set,
+                    dstBinding=binding,
+                    dstArrayElement=0,
+                    descriptorCount=1,
+                    descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                    pBufferInfo=[buffer_info],
+                )
+            )
+        vk.vkUpdateDescriptorSets(device, len(writes), writes, 0, None)
+
+    def _build_command_buffer(self, device, queue_family_index: int):
+        pool_info = vk.VkCommandPoolCreateInfo(
+            sType=vk.VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+            queueFamilyIndex=queue_family_index,
+            flags=vk.VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
+        )
+        command_pool = vk.vkCreateCommandPool(device, pool_info, None)
+        alloc_info = vk.VkCommandBufferAllocateInfo(
+            sType=vk.VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+            commandPool=command_pool,
+            level=vk.VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+            commandBufferCount=1,
+        )
+        command_buffer = vk.vkAllocateCommandBuffers(device, alloc_info)[0]
+        return command_pool, command_buffer
+
+    def _record_and_submit(
+        self,
+        command_buffer,
+        pipeline,
+        pipeline_layout,
+        descriptor_set,
+        queue,
+        global_size: int,
+    ):
+        begin_info = vk.VkCommandBufferBeginInfo(
+            sType=vk.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+            flags=vk.VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+        )
+        vk.vkBeginCommandBuffer(command_buffer, begin_info)
+        vk.vkCmdBindPipeline(command_buffer, vk.VK_PIPELINE_BIND_POINT_COMPUTE, pipeline)
+        vk.vkCmdBindDescriptorSets(
+            command_buffer,
+            vk.VK_PIPELINE_BIND_POINT_COMPUTE,
+            pipeline_layout,
+            0,
+            1,
+            [descriptor_set],
+            0,
+            None,
+        )
+        gx = (global_size + self.config.workgroup[0] - 1) // self.config.workgroup[0]
+        vk.vkCmdDispatch(command_buffer, gx, self.config.workgroup[1], self.config.workgroup[2])
+        vk.vkEndCommandBuffer(command_buffer)
+
+        submit_info = vk.VkSubmitInfo(
+            sType=vk.VK_STRUCTURE_TYPE_SUBMIT_INFO,
+            commandBufferCount=1,
+            pCommandBuffers=[command_buffer],
+        )
+        vk.vkQueueSubmit(queue, 1, [submit_info], vk.VK_NULL_HANDLE)
+        vk.vkQueueWaitIdle(queue)
+
+
+def build_vulkan_dispatcher(config: VulkanKernelConfig, dispatch_config: Optional[VulkanDispatchConfig] = None) -> DispatchFn:
+    """Factory that returns a callable dispatcher for use in VulkanBackendAdapter."""
+    dispatcher = VulkanCarrierDispatcher(config=config, dispatch_config=dispatch_config)
+    return dispatcher.dispatch

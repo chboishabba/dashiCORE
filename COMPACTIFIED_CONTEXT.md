@@ -10,6 +10,7 @@
 - Backend layer: `dashi_core/backend/{base,cpu,registry}.py` plus an explicit accelerated backend candidate matching CPU semantics.
 - Tests mirror spec: `tests/{carrier,kernel,defect,admissibility,mdl,hierarchy,backend,reproducibility,violations}/...`.
 - Precision + determinism locked to CPU reference; backends must declare capabilities and fail loudly on unsupported features.
+- Integration policy for dashiBRAIN: support = node/channel existence (constant True); neutrality handled via external masks, not support flips.
 
 ## Assumptions
 - Python 3.11+, NumPy + PyTest available.
@@ -22,3 +23,4 @@
 ## Current Status
 - Core modules, backend layer (CPU + accelerated), and invariant tests implemented.
 - Tests: `python -m pytest` (31 passed).
+- Integration doc drafted at `docs/dashibrain_core_integration.md`; TODO updated for adapter and graph kernel parity work.

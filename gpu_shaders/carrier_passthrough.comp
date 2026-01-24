@@ -1,0 +1,27 @@
+#version 450
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+// sign_in: int32 values (derived from np.int8 sign)
+layout(set = 0, binding = 0) buffer SignIn {
+    int data[];
+} sign_in;
+
+// support_in: uint32 values (bool -> uint32)
+layout(set = 0, binding = 1) buffer SupportIn {
+    uint data[];
+} support_in;
+
+layout(set = 0, binding = 2) buffer SignOut {
+    int data[];
+} sign_out;
+
+layout(set = 0, binding = 3) buffer SupportOut {
+    uint data[];
+} support_out;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    sign_out.data[idx] = sign_in.data[idx];
+    support_out.data[idx] = support_in.data[idx];
+}

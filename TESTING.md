@@ -344,6 +344,8 @@ cpu_impl(x) == backend_impl(x)
 
 (Currently backend_impl = cpu_impl.)
 
+GPU scaffolding lives under `tests/gpu/` and covers adapter/registry wiring with deterministic fallbacks while enforcing the same Carrier invariants.
+
 ---
 
 ## 8. Forbidden Failure Modes (Tests MUST Catch)
@@ -1565,4 +1567,3 @@ The answer should be:
 > “It doesn’t. It only shows whether the math is behaving.”
 
 If that sentence is not true, the visual is illegal.
-

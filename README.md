@@ -248,4 +248,6 @@ If something feels clever, it probably doesn’t belong here.
 
 * Code lives under `dashi_core/` (`carrier.py`, `kernel.py`, `defect.py`, `admissibility.py`, `mdl.py`, `hierarchy.py`); mock kernels reside in `dashi_core/testing/mock_kernels.py`.
 * Backends are explicit: `dashi_core.backend` exposes CPU + accelerated-compatible backends with `set_backend("cpu"|"accelerated")`; selection is deterministic and global.
+* GPU adapters/backends stay outside CORE: `gpu_vulkan_adapter.py` (adapter + kernel wrapper), `gpu_vulkan_backend.py` (registry helper), `gpu_vulkan_dispatcher.py` (Vulkan compute dispatcher), and `gpu_shaders/carrier_passthrough.comp` (sample GLSL) wire Vulkan kernels via dispatcher hooks without importing Vulkan into `dashi_core/`.
 * Tests mirror theory under `tests/` (`carrier/`, `kernel/`, `defect/`, `admissibility/`, `mdl/`, `hierarchy/`, `backend/`, `violations/`, `reproducibility/`); run with `python -m pytest`.
+* Dependencies: install with `python -m pip install -r requirements-dev.txt` (or `requirements.txt` for runtime only); no GPU/Vulkan deps are pulled into CORE.

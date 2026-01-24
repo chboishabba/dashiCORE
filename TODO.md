@@ -8,3 +8,9 @@
 - [x] Sprint 2: add accelerated backend implementation matching CPU semantics; declare capabilities + precision policy.
 - [x] Sprint 2: add numeric drift + cross-backend reproducibility tests.
 - [x] Run full pytest suite and document results.
+- [ ] Integration prep: document dashiBRAIN support/neutral policy and mapping (done in docs/dashibrain_core_integration.md).
+- [x] Add legacy adapter utilities for signed ↔ Carrier (with neutral mask) and tests.
+- [ ] Define GraphContext + GraphHopKernel wrapping existing graph logic (CPU parity).
+- [ ] Add flow parity + violation guard tests for graph kernels.
+- [x] Keep GPU adapters outside CORE; plan Vulkan adapter using gpu_common_methods.py (post-Sprint2) — Vulkan adapter scaffold + dispatcher hooks landed.
+- [x] Add dependency manifests (`requirements.txt`, `requirements-dev.txt`) and document install command.
