@@ -52,3 +52,7 @@ This note captures how we already exercise GPUs across the repo and how to apply
   - Binds input/output SSBOs for `Carrier` data (support + sign).
   - Dispatches with fixed workgroup sizes and returns a new `Carrier`.
 - Document any new shader contracts next to their SPIR-V outputs to keep the GPU path reproducible.
+- Test device note: a Vulkan-capable GPU is available for validation here; set `VK_ICD_FILENAMES` accordingly and run `python scripts/run_vulkan_core_mask.py` or `python scripts/run_vulkan_passthrough.py` to exercise the path.
+- FFT placeholder: `gpu_vkfft_stub.py` provides `fft2/ifft2/has_vkfft` that fall back to NumPy with a warning when vkFFT bindings are absent; swap to real vkFFT when bindings are available on the target GPU.
+- Majority fusion shader: `gpu_shaders/core_mask_majority.comp` (+ `.spv`) implements K-channel majority vote on ternary carriers (channel-major layout, push constants `n` and `k`, tie → support=0). Compile via `glslc gpu_shaders/core_mask_majority.comp -o gpu_shaders/core_mask_majority.spv`.
+- ICD probing: when `VK_ICD_FILENAMES` is unset, a robust loop is `for icd in /usr/share/vulkan/icd.d/*.json /etc/vulkan/icd.d/*.json; do [ -f \"$icd\" ] && VK_ICD_FILENAMES=\"$icd\" python scripts/run_vulkan_core_mask.py && break; done`.

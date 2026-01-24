@@ -152,7 +152,7 @@ class VulkanCarrierDispatcher:
 
     def dispatch(self, carrier: Carrier) -> Carrier:
         """Single-dispatch convenience wrapper (kept for adapter compatibility)."""
-        out, _ = self.dispatch_batched(carrier, dispatches=1, collect_timing=False)
+        out, _, _ = self.dispatch_batched(carrier, dispatches=1, collect_timing=False)
         return out
 
     def dispatch_batched(

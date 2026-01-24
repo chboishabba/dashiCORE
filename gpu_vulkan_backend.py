@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Optional
 
 from dashi_core.backend import BackendCapabilities, register_backend
@@ -66,3 +67,40 @@ def register_vulkan_backend(
 def make_vulkan_kernel(adapter: VulkanBackendAdapter) -> VulkanCarrierKernel:
     """Helper to build a Kernel wrapper from a registered adapter/backend."""
     return VulkanCarrierKernel(adapter)
+
+
+def register_default_vulkan_backend(
+    *,
+    name: str = "vulkan",
+    shader_path: Optional[Path] = None,
+    spv_path: Optional[Path] = None,
+    device_index: int = 0,
+    workgroup: tuple[int, int, int] = (64, 1, 1),
+    memory_mode: str = "host_visible",
+    allow_fallback: bool = False,
+) -> VulkanBackend:
+    """Register a fully wired Vulkan backend backed by the default CORE mask shader.
+
+    Intended for production/benchmark use where a real GPU dispatch must occur
+    (no silent CPU passthrough).
+    """
+
+    shader = shader_path or Path("gpu_shaders/core_mask.comp")
+    spv = spv_path or shader.with_suffix(".spv")
+
+    config = VulkanKernelConfig(
+        shader_path=shader,
+        spv_path=spv,
+        workgroup=workgroup,
+        compile_on_dispatch=True,
+        compile_on_init=False,
+    )
+
+    dispatch_cfg = VulkanDispatchConfig(device_index=device_index, memory_mode=memory_mode)
+
+    return register_vulkan_backend(
+        name=name,
+        config=config,
+        allow_fallback=allow_fallback,
+        dispatch_config=dispatch_cfg,
+    )
