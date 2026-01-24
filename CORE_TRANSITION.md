@@ -66,4 +66,5 @@ This note captures how we already exercise GPUs across the repo and how to apply
   This iterates ICD JSONs until the Vulkan mask parity test succeeds.
 - Shader rebuild: after editing `gpu_shaders/core_mask_majority.comp`, rebuild with
   `glslc gpu_shaders/core_mask_majority.comp -o gpu_shaders/core_mask_majority.spv`.
+- Auto-register helper: `probe_and_register_vulkan_backend(...)` in `gpu_vulkan_backend.py` will try common ICD JSONs (Mesa RADV, AMDVLK, NVIDIA) and register `vulkan` using the majority-mask shader. It returns `(backend, icd_path)` or `(None, None)` if no ICD works.
 - Current GPU backend status: `accelerated` is CPU-only; Vulkan hooks exist but are not wired into any v4 pipeline in this repo. To actually use GPU masks/FFTs, we need functional GPU kernels and to plumb `dashi_core.backend` into encode_proxy/mask ops. Once a real GPU backend is available, add a `--backend {cpu,vk}` flag in the runner and wrap masking in `with use_backend("vulkan_core_mask"):` to route through Vulkan.

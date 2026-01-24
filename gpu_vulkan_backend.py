@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
+from typing import Iterable, Optional, Tuple
 
 from dashi_core.backend import BackendCapabilities, register_backend
 from gpu_vulkan_adapter import DispatchFn, VulkanBackendAdapter, VulkanCarrierKernel, VulkanKernelConfig
@@ -104,3 +104,77 @@ def register_default_vulkan_backend(
         allow_fallback=allow_fallback,
         dispatch_config=dispatch_cfg,
     )
+
+
+def probe_and_register_vulkan_backend(
+    *,
+    name: str = "vulkan",
+    shader_path: Optional[Path] = None,
+    spv_path: Optional[Path] = None,
+    device_index: int = 0,
+    workgroup: tuple[int, int, int] = (64, 1, 1),
+    memory_mode: str = "host_visible",
+    icd_candidates: Optional[Iterable[Path]] = None,
+) -> Tuple[Optional[VulkanBackend], Optional[Path]]:
+    """
+    Try to register a Vulkan backend by probing ICD JSONs.
+
+    Returns (backend, icd_path). If no ICD works or Vulkan is unavailable,
+    returns (None, None) without raising, leaving the caller to fall back to CPU.
+    """
+    import os
+    import subprocess
+
+    shader = shader_path or Path("gpu_shaders/core_mask_majority.comp")
+    spv = spv_path or shader.with_suffix(".spv")
+
+    # Default ICD search paths
+    candidates: Iterable[Path]
+    if icd_candidates is None:
+        candidates = [
+            Path(p)
+            for p in (
+                "/usr/share/vulkan/icd.d/radeon_icd.x86_64.json",
+                "/usr/share/vulkan/icd.d/amd_icd64.json",
+                "/usr/share/vulkan/icd.d/nvidia_icd.json",
+            )
+        ]
+        # Extend with any present files in standard dirs
+        candidates += list(Path("/usr/share/vulkan/icd.d").glob("*.json"))  # type: ignore
+        candidates += list(Path("/etc/vulkan/icd.d").glob("*.json"))  # type: ignore
+    else:
+        candidates = icd_candidates
+
+    for icd in candidates:
+        if not icd.is_file():
+            continue
+        env = dict(os.environ)
+        env["VK_ICD_FILENAMES"] = str(icd)
+        try:
+            # Light-touch validation: run vulkaninfo --summary if available.
+            if subprocess.call(
+                ["which", "vulkaninfo"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            ) == 0:
+                subprocess.check_call(
+                    ["vulkaninfo", "--summary"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    env=env,
+                )
+        except Exception:
+            continue
+        try:
+            backend = register_default_vulkan_backend(
+                name=name,
+                shader_path=shader,
+                spv_path=spv,
+                device_index=device_index,
+                workgroup=workgroup,
+                memory_mode=memory_mode,
+                allow_fallback=False,
+            )
+            return backend, icd
+        except Exception:
+            # Try next ICD
+            continue
+    return None, None
