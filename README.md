@@ -134,6 +134,20 @@ MDL is **structural**, not statistical.
 
 ---
 
+### 2.6 Observations (Fingerprint)
+
+`StateFingerprint` is a backend-invariant observational helper:
+
+* Type: `Carrier[Ω] -> UInt64`
+* Deterministic, pure, shape- and admissibility-invariant
+* Purpose: witness equality across backends without transferring full state
+* Non-goal: not semantic; never used in kernel/defect/MDL logic
+* Implementations: CPU NumPy reduction; Vulkan GPU-side hash reduction (device-local) used in benchmarks to avoid full readback
+
+Treat observations as **parity witnesses only**, not algorithmic signals.
+
+---
+
 ## 3. Hierarchy & Composition
 
 ### M-Levels
@@ -345,3 +359,19 @@ Latest Vulkan sweep with host-visible vs device-local staging (sign_flip shader)
 | alu_dense_burn, iters=1, sparsity=0.0          | 16,777,216 | 1,042.57 | 3,741.79 | 3,673.29 |
 
 Takeaways: device-local staging is wired but still dominated by submission/transfer overhead for these light kernels; GPU remains slower than CPU even for the larger ALU burn sizes. Compute-only timing and a heavier ALU shader remain the next levers to expose a GPU-favored crossover.
+
+Latest GPU-only, device-local sanity run (RX 580, `alu_dense_burn`, size=1,048,576, batches=4, iterations=1):
+
+- Config: GPU-only, RX 580 (RADV POLARIS10); workload `alu_dense_burn`; size 1,048,576; batches=4 (4 dispatches recorded per submit); iterations=1; memory_mode=device_local; fence_waits=1; hashes match.
+- Compute timing: submit→fence ≈ 5.4–5.7 ms per run — VRAM-resident compute is fast and stable.
+- Wall timing: 38–42 ms — about 34 ms overhead from staging/readback/hash/host bookkeeping.
+- Outcome: GPU compute already beats prior CPU reference (~53 ms) for this config; remaining wall-time gap is host I/O, not dispatch or compute.
+- Conclusion: GPU path is correct and compute-isolated; to drop wall time further you’d need GPU-side reduction or reduced readback scope, not Vulkan dispatch changes.
+
+Latest GPU-only, device-local sanity run (RX 580, `alu_dense_burn`, size=1,048,576, batches=4, iterations=1):
+
+- Config: GPU-only, RX 580 (RADV POLARIS10); workload `alu_dense_burn`; size 1,048,576; batches=4 (4 dispatches recorded per submit); iterations=1; memory_mode=device_local; fence_waits=1; hashes match.
+- Compute timing: submit→fence ≈ 5.4–5.7 ms per run — VRAM-resident compute is fast and stable.
+- Wall timing: 38–42 ms — about 34 ms overhead from staging/readback/hash/host bookkeeping.
+- Outcome: GPU compute already beats prior CPU reference (~53 ms) for this config; remaining wall-time gap is host I/O, not dispatch or compute.
+- Conclusion: GPU path is correct and compute-isolated; to drop wall time further you’d need GPU-side reduction or reduced readback scope, not Vulkan dispatch changes.

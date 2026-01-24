@@ -43,6 +43,12 @@ def _hash_array(arr: np.ndarray) -> str:
     return str(np.int64(np.sum(arr.astype(np.int64) * 31)) % (10**12))
 
 
+def _hash_gpu_style(sign: np.ndarray, support: np.ndarray) -> int:
+    val = sign.astype(np.uint32) ^ (support.astype(np.uint32) << 1)
+    mixed = val * np.uint32(2654435761)
+    return int(np.bitwise_xor.reduce(mixed, dtype=np.uint32))
+
+
 def _make_carrier(n: int, sparsity: float, seed: int, workload: str) -> Carrier:
     return workloads.make(workload, n, sparsity, seed)
 
@@ -357,10 +363,15 @@ def bench_kernel_dense_vulkan(
     cpu_only: bool = False,
     gpu_only: bool = False,
     log_process_cpu: bool = False,
+    gpu_hash_only: bool = False,
 ):
     """Benchmark dense Vulkan kernel (sign-flip) vs dense CPU reference."""
     if cpu_only and gpu_only:
         raise ValueError("cpu_only and gpu_only cannot both be set")
+    if gpu_hash_only and cpu_only:
+        raise ValueError("gpu_hash_only requires GPU path; cannot combine with cpu_only")
+    if gpu_hash_only and memory_mode != "device_local":
+        raise ValueError("gpu_hash_only requires device_local memory mode")
 
     results: List[str] = []
     meta = {
@@ -369,6 +380,7 @@ def bench_kernel_dense_vulkan(
         "iterations": iterations,
         "workload": workload,
         "memory_mode": memory_mode,
+        "gpu_hash_only": gpu_hash_only,
     }
 
     dispatcher: Optional[VulkanCarrierDispatcher] = None
@@ -399,18 +411,21 @@ def bench_kernel_dense_vulkan(
             for batch_count in batches:
                 dispatches_per_run = batch_count * iterations
                 ref_time = None
-                ref_hash = ""
+                ref_hash_dense = ""
+                ref_out = None
+                # Hash used for GPU-hash-only comparison (matches GPU reduction mix)
+                ref_hash_gpu = str(_hash_gpu_style(carrier.sign, carrier.support))
                 if not gpu_only:
                     ref_start = _now_ms()
-                    ref_out = None
                     for _ in range(dispatches_per_run):
                         ref_out = ref_kernel(carrier)
                     ref_time = _now_ms() - ref_start
-                    ref_hash = _hash_array(ref_out.to_signed()) if ref_out is not None else ""
+                    if ref_out is not None:
+                        ref_hash_dense = _hash_array(ref_out.to_signed())
                 else:
-                    # still compute reference hash for GPU-only correctness check
+                    # still compute reference hashes for GPU-only correctness check
                     ref_out = ref_kernel(carrier)
-                    ref_hash = _hash_array(ref_out.to_signed())
+                    ref_hash_dense = _hash_array(ref_out.to_signed())
                 for run in range(repeats):
                     meta_run = meta
                     if log_process_cpu:
@@ -436,20 +451,30 @@ def bench_kernel_dense_vulkan(
                             t_submit_to_fence_ms=None,
                             fence_waits=None,
                             dispatches_per_run=dispatches_per_run,
-                            hash_out=ref_hash,
-                            hash_ref=ref_hash,
+                            hash_out=ref_hash_dense,
+                            hash_ref=ref_hash_dense,
                             match=True,
                             meta=meta_run,
                         )
                         results.append(res_ref.to_json())
 
                     if not cpu_only:
-                        vk_out, timing = dispatcher.dispatch_batched(
-                            carrier, dispatches=dispatches_per_run, collect_timing=True
+                        vk_out, timing, hash_val = dispatcher.dispatch_batched(
+                            carrier,
+                            dispatches=dispatches_per_run,
+                            collect_timing=True,
+                            hash_only=gpu_hash_only,
                         )
                         submit_ms = timing.submit_to_fence_ms if timing else None
                         wall_ms = timing.wall_ms if timing else None
-                        vk_hash = _hash_array(vk_out.to_signed()) if vk_out is not None else ""
+                        if gpu_hash_only:
+                            vk_hash = str(hash_val) if hash_val is not None else ""
+                            hash_ref = ref_hash_gpu
+                            match = vk_hash == hash_ref
+                        else:
+                            vk_hash = _hash_array(vk_out.to_signed()) if vk_out is not None else ""
+                            hash_ref = ref_hash_dense
+                            match = bool(vk_hash == hash_ref)
                         res = BenchResult(
                             suite="kernel_dense_vulkan",
                             mode="vulkan_dense",
@@ -470,8 +495,8 @@ def bench_kernel_dense_vulkan(
                             fence_waits=timing.fence_waits if timing else None,
                             dispatches_per_run=dispatches_per_run,
                             hash_out=vk_hash,
-                            hash_ref=ref_hash,
-                            match=bool(vk_hash == ref_hash),
+                            hash_ref=hash_ref,
+                            match=match,
                             meta=meta_run,
                         )
                         results.append(res.to_json())
@@ -555,6 +580,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p.add_argument("--cpu-only", action="store_true", help="For kernel_dense_vulkan, emit only CPU reference rows.")
     p.add_argument("--gpu-only", action="store_true", help="For kernel_dense_vulkan, emit only Vulkan rows (still requires a visible device).")
     p.add_argument("--log-process-cpu", action="store_true", help="Record instantaneous process %%CPU (via ps) into result meta.")
+    p.add_argument("--gpu-hash-only", action="store_true", help="For kernel_dense_vulkan, skip full readback and use GPU-side hash reduction (device_local only).")
     return p.parse_args(argv)
 
 
@@ -606,6 +632,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             cpu_only=args.cpu_only,
             gpu_only=args.gpu_only,
             log_process_cpu=args.log_process_cpu,
+            gpu_hash_only=args.gpu_hash_only,
         )
     else:
         raise ValueError(f"Unknown suite: {args.suite}")

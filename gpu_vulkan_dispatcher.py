@@ -155,8 +155,19 @@ class VulkanCarrierDispatcher:
         out, _ = self.dispatch_batched(carrier, dispatches=1, collect_timing=False)
         return out
 
-    def dispatch_batched(self, carrier: Carrier, dispatches: int = 1, *, collect_timing: bool = False):
-        """Record `dispatches` dispatches into one command buffer, submit once, wait once."""
+    def dispatch_batched(
+        self,
+        carrier: Carrier,
+        dispatches: int = 1,
+        *,
+        collect_timing: bool = False,
+        hash_only: bool = False,
+    ):
+        """Record `dispatches` dispatches into one command buffer, submit once, wait once.
+
+        When `hash_only` is True (device_local path), compute a GPU-side hash of outputs and
+        avoid full readback; returns (Carrier | None, DispatchTiming | None, hash_value | None).
+        """
         _require_vk()
         compile_shader(self.config.shader_path, self.config.spv_path)
 
@@ -178,6 +189,10 @@ class VulkanCarrierDispatcher:
         memories = []
         staging_buffers = []
         staging_memories = []
+        hash_buffer = None
+        hash_memory = None
+        hash_staging_buffer = None
+        hash_staging_memory = None
         memory_mode = getattr(self.dispatch_config, "memory_mode", "host_visible")
         if memory_mode not in ("host_visible", "device_local"):
             memory_mode = "host_visible"
@@ -189,6 +204,10 @@ class VulkanCarrierDispatcher:
                 usage_storage = vk.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
                 usage_copy_src = vk.VK_BUFFER_USAGE_TRANSFER_SRC_BIT
                 usage_copy_dst = vk.VK_BUFFER_USAGE_TRANSFER_DST_BIT
+                hash_shader_path = self.config.shader_path.parent / "hash_reduce.comp"
+                hash_spv_path = hash_shader_path.with_suffix(".spv")
+                if hash_only:
+                    compile_shader(hash_shader_path, hash_spv_path)
 
                 # Staging inputs (host visible, copy src)
                 for arr in (sign_in, support_in):
@@ -206,6 +225,21 @@ class VulkanCarrierDispatcher:
                     )
                     buffers.append(buf)
                     memories.append(mem)
+                # Device-local hash buffer (4 bytes) plus staging hash buffer
+                hash_buffer, hash_memory = _create_buffer(
+                    device,
+                    mem_props,
+                    4,
+                    usage_storage | usage_copy_src | usage_copy_dst,
+                    vk.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                )
+                hash_staging_buffer, hash_staging_memory = _create_buffer(
+                    device,
+                    mem_props,
+                    4,
+                    usage_copy_dst,
+                    HOST_VISIBLE_COHERENT,
+                )
                 # Staging outputs (host visible, copy dst)
                 for arr in (sign_out, support_out):
                     buf, mem = _create_buffer(device, mem_props, arr.nbytes, usage_copy_dst, HOST_VISIBLE_COHERENT)
@@ -223,6 +257,7 @@ class VulkanCarrierDispatcher:
                 self._bind_buffers(device, descriptor_set, buffers, [sign_in, support_in, sign_out, support_out])
                 command_pool, command_buffer = self._build_command_buffer(device, queue_family_index)
 
+                hash_handles: dict = {}
                 submit_ms = self._record_with_copies(
                     device=device,
                     command_buffer=command_buffer,
@@ -238,10 +273,33 @@ class VulkanCarrierDispatcher:
                     sign_nbytes=sign_in.nbytes,
                     support_nbytes=support_in.nbytes,
                     dispatch_count=max(1, int(dispatches)),
+                    hash_only=hash_only,
+                    hash_buffer=hash_buffer,
+                    hash_staging_buffer=hash_staging_buffer,
+                    hash_push_constant=sign_in.shape[0],
+                    hash_spv_path=hash_spv_path if hash_only else None,
+                    hash_handles=hash_handles,
                 )
 
-                sign_result = _read_buffer(device, staging_memories[2], sign_out.shape, sign_out.dtype)
-                support_result = _read_buffer(device, staging_memories[3], support_out.shape, support_out.dtype)
+                if not hash_only:
+                    sign_result = _read_buffer(device, staging_memories[2], sign_out.shape, sign_out.dtype)
+                    support_result = _read_buffer(device, staging_memories[3], support_out.shape, support_out.dtype)
+                else:
+                    sign_result = None
+                    support_result = None
+                hash_value = None
+                if hash_only:
+                    mapped = vk.vkMapMemory(device, hash_staging_memory, 0, 4, 0)
+                    try:
+                        try:
+                            mv = memoryview(mapped)
+                            hash_value = int(np.frombuffer(mv, dtype=np.uint32, count=1)[0])
+                        except TypeError:
+                            addr = _ptr_to_int(mapped)
+                            buf = ctypes.string_at(addr, 4)
+                            hash_value = int(np.frombuffer(buf, dtype=np.uint32, count=1)[0])
+                    finally:
+                        vk.vkUnmapMemory(device, hash_staging_memory)
             else:
                 host_flags = HOST_VISIBLE_COHERENT
                 buffer_usage = vk.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
@@ -274,15 +332,18 @@ class VulkanCarrierDispatcher:
 
                 sign_result = _read_buffer(device, memories[2], sign_out.shape, sign_out.dtype)
                 support_result = _read_buffer(device, memories[3], support_out.shape, support_out.dtype)
+                hash_value = None
 
-            support = support_result.astype(bool)
-            sign = np.asarray(np.sign(sign_result), dtype=np.int8)
-            carrier_out = Carrier(support=support, sign=sign)
+            carrier_out = None
+            if sign_result is not None and support_result is not None:
+                support = support_result.astype(bool)
+                sign = np.asarray(np.sign(sign_result), dtype=np.int8)
+                carrier_out = Carrier(support=support, sign=sign)
             timing = None
             if collect_timing and submit_ms is not None:
                 wall_ms = _now_ms() - wall_start
                 timing = DispatchTiming(submit_to_fence_ms=submit_ms, wall_ms=wall_ms, fence_waits=1)
-            return carrier_out, timing
+            return carrier_out, timing, hash_value
         finally:
             # Clean up resources (reverse order of creation where relevant)
             if 'command_pool' in locals():
@@ -303,6 +364,26 @@ class VulkanCarrierDispatcher:
             for buf, mem in zip(buffers[::-1], memories[::-1]):
                 vk.vkDestroyBuffer(device, buf, None)
                 vk.vkFreeMemory(device, mem, None)
+            if hash_buffer is not None:
+                vk.vkDestroyBuffer(device, hash_buffer, None)
+            if hash_memory is not None:
+                vk.vkFreeMemory(device, hash_memory, None)
+            if hash_staging_buffer is not None:
+                vk.vkDestroyBuffer(device, hash_staging_buffer, None)
+            if hash_staging_memory is not None:
+                vk.vkFreeMemory(device, hash_staging_memory, None)
+            if 'hash_handles' in locals():
+                h = hash_handles
+                if h.get("hash_descriptor_pool"):
+                    vk.vkDestroyDescriptorPool(device, h["hash_descriptor_pool"], None)
+                if h.get("hash_pipeline"):
+                    vk.vkDestroyPipeline(device, h["hash_pipeline"], None)
+                if h.get("hash_pipeline_layout"):
+                    vk.vkDestroyPipelineLayout(device, h["hash_pipeline_layout"], None)
+                if h.get("hash_set_layout"):
+                    vk.vkDestroyDescriptorSetLayout(device, h["hash_set_layout"], None)
+                if h.get("hash_shader"):
+                    vk.vkDestroyShaderModule(device, h["hash_shader"], None)
             vk.vkDestroyDevice(device, None)
             vk.vkDestroyInstance(instance, None)
 
@@ -380,6 +461,105 @@ class VulkanCarrierDispatcher:
             pCode=code_bytes,
         )
         return vk.vkCreateShaderModule(device, create_info, None)
+
+    def _build_hash_layout(self, device):
+        bindings = [
+            vk.VkDescriptorSetLayoutBinding(
+                binding=0,
+                descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                descriptorCount=1,
+                stageFlags=vk.VK_SHADER_STAGE_COMPUTE_BIT,
+                pImmutableSamplers=None,
+            ),
+            vk.VkDescriptorSetLayoutBinding(
+                binding=1,
+                descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                descriptorCount=1,
+                stageFlags=vk.VK_SHADER_STAGE_COMPUTE_BIT,
+                pImmutableSamplers=None,
+            ),
+            vk.VkDescriptorSetLayoutBinding(
+                binding=2,
+                descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                descriptorCount=1,
+                stageFlags=vk.VK_SHADER_STAGE_COMPUTE_BIT,
+                pImmutableSamplers=None,
+            ),
+        ]
+        layout_info = vk.VkDescriptorSetLayoutCreateInfo(
+            sType=vk.VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+            bindingCount=len(bindings),
+            pBindings=bindings,
+        )
+        descriptor_set_layout = vk.vkCreateDescriptorSetLayout(device, layout_info, None)
+        push_range = vk.VkPushConstantRange(stageFlags=vk.VK_SHADER_STAGE_COMPUTE_BIT, offset=0, size=4)
+        pipeline_layout_info = vk.VkPipelineLayoutCreateInfo(
+            sType=vk.VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+            setLayoutCount=1,
+            pSetLayouts=[descriptor_set_layout],
+            pushConstantRangeCount=1,
+            pPushConstantRanges=[push_range],
+        )
+        pipeline_layout = vk.vkCreatePipelineLayout(device, pipeline_layout_info, None)
+        return descriptor_set_layout, pipeline_layout
+
+    def _create_hash_pipeline(self, device, pipeline_layout, shader_module):
+        stage_info = vk.VkPipelineShaderStageCreateInfo(
+            sType=vk.VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            stage=vk.VK_SHADER_STAGE_COMPUTE_BIT,
+            module=shader_module,
+            pName="main",
+        )
+        pipeline_info = vk.VkComputePipelineCreateInfo(
+            sType=vk.VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+            stage=stage_info,
+            layout=pipeline_layout,
+        )
+        return vk.vkCreateComputePipelines(device, vk.VK_NULL_HANDLE, 1, [pipeline_info], None)[0]
+
+    def _allocate_hash_descriptors(self, device, descriptor_set_layout):
+        pool_sizes = [
+            vk.VkDescriptorPoolSize(
+                type=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                descriptorCount=3,
+            )
+        ]
+        pool_info = vk.VkDescriptorPoolCreateInfo(
+            sType=vk.VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+            poolSizeCount=len(pool_sizes),
+            pPoolSizes=pool_sizes,
+            maxSets=1,
+        )
+        descriptor_pool = vk.vkCreateDescriptorPool(device, pool_info, None)
+        alloc_info = vk.VkDescriptorSetAllocateInfo(
+            sType=vk.VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+            descriptorPool=descriptor_pool,
+            descriptorSetCount=1,
+            pSetLayouts=[descriptor_set_layout],
+        )
+        descriptor_set = vk.vkAllocateDescriptorSets(device, alloc_info)[0]
+        return descriptor_pool, descriptor_set
+
+    def _bind_hash_buffers(self, device, descriptor_set, sign_buffer, support_buffer, hash_buffer):
+        infos = [
+            vk.VkDescriptorBufferInfo(buffer=sign_buffer, offset=0, range=vk.VK_WHOLE_SIZE),
+            vk.VkDescriptorBufferInfo(buffer=support_buffer, offset=0, range=vk.VK_WHOLE_SIZE),
+            vk.VkDescriptorBufferInfo(buffer=hash_buffer, offset=0, range=vk.VK_WHOLE_SIZE),
+        ]
+        writes = []
+        for idx, info in enumerate(infos):
+            writes.append(
+                vk.VkWriteDescriptorSet(
+                    sType=vk.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                    dstSet=descriptor_set,
+                    dstBinding=idx,
+                    dstArrayElement=0,
+                    descriptorCount=1,
+                    descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                    pBufferInfo=[info],
+                )
+            )
+        vk.vkUpdateDescriptorSets(device, len(writes), writes, 0, None)
 
     def _create_pipeline(self, device, pipeline_layout, shader_module):
         stage_info = vk.VkPipelineShaderStageCreateInfo(
@@ -517,6 +697,12 @@ class VulkanCarrierDispatcher:
         sign_nbytes: int,
         support_nbytes: int,
         dispatch_count: int,
+        hash_only: bool,
+        hash_buffer,
+        hash_staging_buffer,
+        hash_push_constant: int,
+        hash_spv_path: Optional[Path],
+        hash_handles: dict,
     ):
         begin_info = vk.VkCommandBufferBeginInfo(
             sType=vk.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
@@ -628,21 +814,112 @@ class VulkanCarrierDispatcher:
             None,
         )
 
-        # Copy outputs back to staging
-        vk.vkCmdCopyBuffer(
-            command_buffer,
-            device_out[0],
-            staging_out[0],
-            1,
-            [vk.VkBufferCopy(srcOffset=0, dstOffset=0, size=sign_nbytes)],
-        )
-        vk.vkCmdCopyBuffer(
-            command_buffer,
-            device_out[1],
-            staging_out[1],
-            1,
-            [vk.VkBufferCopy(srcOffset=0, dstOffset=0, size=support_nbytes)],
-        )
+        if hash_only:
+            # Zero hash buffer then run hash reduction over outputs
+            vk.vkCmdFillBuffer(command_buffer, hash_buffer, 0, vk.VK_WHOLE_SIZE, 0)
+            hash_barrier_in = vk.VkBufferMemoryBarrier(
+                sType=vk.VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
+                srcAccessMask=vk.VK_ACCESS_SHADER_WRITE_BIT,
+                dstAccessMask=vk.VK_ACCESS_SHADER_READ_BIT,
+                srcQueueFamilyIndex=vk.VK_QUEUE_FAMILY_IGNORED,
+                dstQueueFamilyIndex=vk.VK_QUEUE_FAMILY_IGNORED,
+                buffer=hash_buffer,
+                offset=0,
+                size=vk.VK_WHOLE_SIZE,
+            )
+            vk.vkCmdPipelineBarrier(
+                command_buffer,
+                vk.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                vk.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                0,
+                0,
+                None,
+                1,
+                [hash_barrier_in],
+                0,
+                None,
+            )
+            hash_set_layout, hash_pipeline_layout = self._build_hash_layout(device)
+            hash_shader = self._create_shader_module(device, hash_spv_path)
+            hash_pipeline = self._create_hash_pipeline(device, hash_pipeline_layout, hash_shader)
+            hash_descriptor_pool, hash_descriptor_set = self._allocate_hash_descriptors(device, hash_set_layout)
+            hash_handles.update(
+                {
+                    "hash_set_layout": hash_set_layout,
+                    "hash_pipeline_layout": hash_pipeline_layout,
+                    "hash_shader": hash_shader,
+                    "hash_pipeline": hash_pipeline,
+                    "hash_descriptor_pool": hash_descriptor_pool,
+                }
+            )
+            self._bind_hash_buffers(device, hash_descriptor_set, device_out[0], device_out[1], hash_buffer)
+            vk.vkCmdBindPipeline(command_buffer, vk.VK_PIPELINE_BIND_POINT_COMPUTE, hash_pipeline)
+            vk.vkCmdBindDescriptorSets(
+                command_buffer,
+                vk.VK_PIPELINE_BIND_POINT_COMPUTE,
+                hash_pipeline_layout,
+                0,
+                1,
+                [hash_descriptor_set],
+                0,
+                None,
+            )
+            vk.vkCmdPushConstants(
+                command_buffer,
+                hash_pipeline_layout,
+                vk.VK_SHADER_STAGE_COMPUTE_BIT,
+                0,
+                4,
+                np.int32(hash_push_constant).tobytes(),
+            )
+            gx_hash = (global_size + 256 - 1) // 256
+            vk.vkCmdDispatch(command_buffer, gx_hash, 1, 1)
+            # Barrier for hash writes -> transfer
+            hash_barrier_out = vk.VkBufferMemoryBarrier(
+                sType=vk.VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
+                srcAccessMask=vk.VK_ACCESS_SHADER_WRITE_BIT,
+                dstAccessMask=vk.VK_ACCESS_TRANSFER_READ_BIT,
+                srcQueueFamilyIndex=vk.VK_QUEUE_FAMILY_IGNORED,
+                dstQueueFamilyIndex=vk.VK_QUEUE_FAMILY_IGNORED,
+                buffer=hash_buffer,
+                offset=0,
+                size=vk.VK_WHOLE_SIZE,
+            )
+            vk.vkCmdPipelineBarrier(
+                command_buffer,
+                vk.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                vk.VK_PIPELINE_STAGE_TRANSFER_BIT,
+                0,
+                0,
+                None,
+                1,
+                [hash_barrier_out],
+                0,
+                None,
+            )
+            vk.vkCmdCopyBuffer(
+                command_buffer,
+                hash_buffer,
+                hash_staging_buffer,
+                1,
+                [vk.VkBufferCopy(srcOffset=0, dstOffset=0, size=4)],
+            )
+        else:
+            # Copy outputs back to staging
+            vk.vkCmdCopyBuffer(
+                command_buffer,
+                device_out[0],
+                staging_out[0],
+                1,
+                [vk.VkBufferCopy(srcOffset=0, dstOffset=0, size=sign_nbytes)],
+            )
+            vk.vkCmdCopyBuffer(
+                command_buffer,
+                device_out[1],
+                staging_out[1],
+                1,
+                [vk.VkBufferCopy(srcOffset=0, dstOffset=0, size=support_nbytes)],
+            )
 
         vk.vkEndCommandBuffer(command_buffer)
         submit_info = vk.VkSubmitInfo(

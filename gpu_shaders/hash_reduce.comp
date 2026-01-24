@@ -1,0 +1,26 @@
+#version 450
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly buffer SignBuf {
+    int data[];
+} SignIn;
+layout(std430, binding = 1) readonly buffer SupportBuf {
+    uint data[];
+} SupportIn;
+layout(std430, binding = 2) buffer HashBuf {
+    uint hash;
+} HashOut;
+
+layout(push_constant) uniform PushConsts {
+    uint n;
+} pc;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= pc.n) {
+        return;
+    }
+    // Simple mixing: XOR sign (as uint) with support<<1 to add variation
+    uint val = uint(SignIn.data[idx]) ^ (SupportIn.data[idx] << 1);
+    atomicXor(HashOut.hash, val * 2654435761u); // mix with Knuth constant
+}

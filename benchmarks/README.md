@@ -31,6 +31,7 @@ Flags:
 - `--threads`: cap CPU threads (sets OMP/BLAS env + `numpy.set_num_threads` when available) for fair CPU vs GPU comparisons
 - `--cpu-only` / `--gpu-only`: restrict `kernel_dense_vulkan` to emit only the CPU reference rows or only the Vulkan rows (default is both). `--gpu-only` still requires a visible Vulkan device; `--cpu-only` skips Vulkan import and device checks.
 - `--log-process-cpu`: add `process_cpu_pct` (via `ps -p <PID> -o %cpu --noheader`) into emitted rows for spot-checking host load during GPU runs.
+- `--gpu-hash-only`: device-local only; uses a GPU-side hash reduction to avoid full output readback and returns only the hash + timing for Vulkan rows.
 
 Notes:
 - Benchmarks use dense `Carrier` semantics; PQ is measured as an optional storage/transport encoding.
@@ -60,3 +61,4 @@ Notes:
 - A GPU-favoured workload is queued: `--workload alu_dense_burn` with large sizes (≥1M) and a `--rounds` axis to raise arithmetic intensity without changing semantics, timed in device-local mode with submit→fence timing. A rounds sweep (e.g., 1 vs 4096) should flip slope if compute is isolated.
 - Latest runs (RX 580, sign_flip shader): host-visible vs device-local staging files are in `benchmarks/results/` (e.g., `kernel_dense_vulkan-stencil-host-visible-*.jsonl`, `kernel_dense_vulkan-stencil-device-local-*.jsonl`, `kernel_dense_vulkan-alu-host-visible-*.jsonl`, `kernel_dense_vulkan-alu-device-local-*.jsonl`). Device-local staging is functional but still overhead-dominated; compute-only timing remains TODO.
 - JSONL rows now include `t_submit_to_fence_ms`, `fence_waits`, and `dispatches_per_run` to validate single-submit timing and fence isolation for Vulkan runs.
+- `--gpu-hash-only` reduces outputs to a GPU-side hash (device_local only) so wall timing reflects compute+minimal readback; parity is checked against the same hash mix on CPU.
