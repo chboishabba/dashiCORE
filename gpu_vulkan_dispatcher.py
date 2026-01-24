@@ -29,6 +29,7 @@ class VulkanDispatchConfig:
 
     device_index: int = 0
     queue_family_index: Optional[int] = None
+    memory_mode: str = "host_visible"  # "host_visible" (zero-copy) or "device_local" (staged, VRAM-resident)
 
 
 def _require_vk() -> None:
@@ -153,38 +154,100 @@ class VulkanCarrierDispatcher:
         sign_out = np.empty_like(sign_in)
         support_out = np.empty_like(support_in)
 
-        host_flags = HOST_VISIBLE_COHERENT
-        buffer_usage = vk.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
-
         buffers = []
         memories = []
+        staging_buffers = []
+        staging_memories = []
+        memory_mode = getattr(self.dispatch_config, "memory_mode", "host_visible")
+        if memory_mode not in ("host_visible", "device_local"):
+            memory_mode = "host_visible"
         try:
-            for arr in (sign_in, support_in, sign_out, support_out):
-                buffer, memory = _create_buffer(device, mem_props, arr.nbytes, buffer_usage, host_flags)
-                buffers.append(buffer)
-                memories.append(memory)
+            if memory_mode == "device_local":
+                # Device-local buffers for compute, host-visible staging for IO
+                usage_storage = vk.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+                usage_copy_src = vk.VK_BUFFER_USAGE_TRANSFER_SRC_BIT
+                usage_copy_dst = vk.VK_BUFFER_USAGE_TRANSFER_DST_BIT
 
-            _write_buffer(device, memories[0], sign_in)
-            _write_buffer(device, memories[1], support_in)
+                # Staging inputs (host visible, copy src)
+                for arr in (sign_in, support_in):
+                    buf, mem = _create_buffer(device, mem_props, arr.nbytes, usage_copy_src, HOST_VISIBLE_COHERENT)
+                    staging_buffers.append(buf)
+                    staging_memories.append(mem)
+                # Device buffers (storage + copy src/dst)
+                for arr in (sign_in, support_in, sign_out, support_out):
+                    buf, mem = _create_buffer(
+                        device,
+                        mem_props,
+                        arr.nbytes,
+                        usage_storage | usage_copy_src | usage_copy_dst,
+                        vk.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                    )
+                    buffers.append(buf)
+                    memories.append(mem)
+                # Staging outputs (host visible, copy dst)
+                for arr in (sign_out, support_out):
+                    buf, mem = _create_buffer(device, mem_props, arr.nbytes, usage_copy_dst, HOST_VISIBLE_COHERENT)
+                    staging_buffers.append(buf)
+                    staging_memories.append(mem)
 
-            descriptor_set_layout, pipeline_layout = self._build_layouts(device)
-            shader_module = self._create_shader_module(device, self.config.spv_path)
-            pipeline = self._create_pipeline(device, pipeline_layout, shader_module)
-            descriptor_pool, descriptor_set = self._allocate_descriptors(device, descriptor_set_layout)
-            self._bind_buffers(device, descriptor_set, buffers, [sign_in, support_in, sign_out, support_out])
-            command_pool, command_buffer = self._build_command_buffer(device, queue_family_index)
+                # Upload inputs to staging
+                _write_buffer(device, staging_memories[0], sign_in)
+                _write_buffer(device, staging_memories[1], support_in)
 
-            self._record_and_submit(
-                command_buffer,
-                pipeline,
-                pipeline_layout,
-                descriptor_set,
-                queue,
-                global_size=sign_in.shape[0],
-            )
+                descriptor_set_layout, pipeline_layout = self._build_layouts(device)
+                shader_module = self._create_shader_module(device, self.config.spv_path)
+                pipeline = self._create_pipeline(device, pipeline_layout, shader_module)
+                descriptor_pool, descriptor_set = self._allocate_descriptors(device, descriptor_set_layout)
+                self._bind_buffers(device, descriptor_set, buffers, [sign_in, support_in, sign_out, support_out])
+                command_pool, command_buffer = self._build_command_buffer(device, queue_family_index)
 
-            sign_result = _read_buffer(device, memories[2], sign_out.shape, sign_out.dtype)
-            support_result = _read_buffer(device, memories[3], support_out.shape, support_out.dtype)
+                self._record_with_copies(
+                    command_buffer=command_buffer,
+                    pipeline=pipeline,
+                    pipeline_layout=pipeline_layout,
+                    descriptor_set=descriptor_set,
+                    queue=queue,
+                    global_size=sign_in.shape[0],
+                    staging_in=staging_buffers[:2],
+                    device_in=buffers[:2],
+                    staging_out=staging_buffers[2:],
+                    device_out=buffers[2:],
+                    sign_nbytes=sign_in.nbytes,
+                    support_nbytes=support_in.nbytes,
+                )
+
+                sign_result = _read_buffer(device, staging_memories[2], sign_out.shape, sign_out.dtype)
+                support_result = _read_buffer(device, staging_memories[3], support_out.shape, support_out.dtype)
+            else:
+                host_flags = HOST_VISIBLE_COHERENT
+                buffer_usage = vk.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+
+                for arr in (sign_in, support_in, sign_out, support_out):
+                    buffer, memory = _create_buffer(device, mem_props, arr.nbytes, buffer_usage, host_flags)
+                    buffers.append(buffer)
+                    memories.append(memory)
+
+                _write_buffer(device, memories[0], sign_in)
+                _write_buffer(device, memories[1], support_in)
+
+                descriptor_set_layout, pipeline_layout = self._build_layouts(device)
+                shader_module = self._create_shader_module(device, self.config.spv_path)
+                pipeline = self._create_pipeline(device, pipeline_layout, shader_module)
+                descriptor_pool, descriptor_set = self._allocate_descriptors(device, descriptor_set_layout)
+                self._bind_buffers(device, descriptor_set, buffers, [sign_in, support_in, sign_out, support_out])
+                command_pool, command_buffer = self._build_command_buffer(device, queue_family_index)
+
+                self._record_and_submit(
+                    command_buffer,
+                    pipeline,
+                    pipeline_layout,
+                    descriptor_set,
+                    queue,
+                    global_size=sign_in.shape[0],
+                )
+
+                sign_result = _read_buffer(device, memories[2], sign_out.shape, sign_out.dtype)
+                support_result = _read_buffer(device, memories[3], support_out.shape, support_out.dtype)
 
             support = support_result.astype(bool)
             sign = np.asarray(np.sign(sign_result), dtype=np.int8)
@@ -203,6 +266,9 @@ class VulkanCarrierDispatcher:
                 vk.vkDestroyDescriptorSetLayout(device, descriptor_set_layout, None)
             if 'shader_module' in locals():
                 vk.vkDestroyShaderModule(device, shader_module, None)
+            for buf, mem in zip(staging_buffers[::-1], staging_memories[::-1]):
+                vk.vkDestroyBuffer(device, buf, None)
+                vk.vkFreeMemory(device, mem, None)
             for buf, mem in zip(buffers[::-1], memories[::-1]):
                 vk.vkDestroyBuffer(device, buf, None)
                 vk.vkFreeMemory(device, mem, None)
@@ -387,6 +453,156 @@ class VulkanCarrierDispatcher:
         vk.vkCmdDispatch(command_buffer, gx, self.config.workgroup[1], self.config.workgroup[2])
         vk.vkEndCommandBuffer(command_buffer)
 
+        submit_info = vk.VkSubmitInfo(
+            sType=vk.VK_STRUCTURE_TYPE_SUBMIT_INFO,
+            commandBufferCount=1,
+            pCommandBuffers=[command_buffer],
+        )
+        vk.vkQueueSubmit(queue, 1, [submit_info], vk.VK_NULL_HANDLE)
+        vk.vkQueueWaitIdle(queue)
+
+    def _record_with_copies(
+        self,
+        *,
+        command_buffer,
+        pipeline,
+        pipeline_layout,
+        descriptor_set,
+        queue,
+        global_size: int,
+        staging_in,
+        device_in,
+        staging_out,
+        device_out,
+        sign_nbytes: int,
+        support_nbytes: int,
+    ):
+        begin_info = vk.VkCommandBufferBeginInfo(
+            sType=vk.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+            flags=vk.VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+        )
+        vk.vkBeginCommandBuffer(command_buffer, begin_info)
+
+        # Copy staging inputs -> device-local inputs
+        vk.vkCmdCopyBuffer(
+            command_buffer,
+            staging_in[0],
+            device_in[0],
+            1,
+            [vk.VkBufferCopy(srcOffset=0, dstOffset=0, size=sign_nbytes)],
+        )
+        vk.vkCmdCopyBuffer(
+            command_buffer,
+            staging_in[1],
+            device_in[1],
+            1,
+            [vk.VkBufferCopy(srcOffset=0, dstOffset=0, size=support_nbytes)],
+        )
+
+        # Barrier to make transfer writes visible to shader reads
+        barriers_in = [
+            vk.VkBufferMemoryBarrier(
+                sType=vk.VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
+                srcAccessMask=vk.VK_ACCESS_TRANSFER_WRITE_BIT,
+                dstAccessMask=vk.VK_ACCESS_SHADER_READ_BIT,
+                srcQueueFamilyIndex=vk.VK_QUEUE_FAMILY_IGNORED,
+                dstQueueFamilyIndex=vk.VK_QUEUE_FAMILY_IGNORED,
+                buffer=device_in[0],
+                offset=0,
+                size=sign_nbytes,
+            ),
+            vk.VkBufferMemoryBarrier(
+                sType=vk.VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
+                srcAccessMask=vk.VK_ACCESS_TRANSFER_WRITE_BIT,
+                dstAccessMask=vk.VK_ACCESS_SHADER_READ_BIT,
+                srcQueueFamilyIndex=vk.VK_QUEUE_FAMILY_IGNORED,
+                dstQueueFamilyIndex=vk.VK_QUEUE_FAMILY_IGNORED,
+                buffer=device_in[1],
+                offset=0,
+                size=support_nbytes,
+            ),
+        ]
+        vk.vkCmdPipelineBarrier(
+            command_buffer,
+            vk.VK_PIPELINE_STAGE_TRANSFER_BIT,
+            vk.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            0,
+            0,
+            None,
+            len(barriers_in),
+            barriers_in,
+            0,
+            None,
+        )
+
+        # Dispatch
+        vk.vkCmdBindPipeline(command_buffer, vk.VK_PIPELINE_BIND_POINT_COMPUTE, pipeline)
+        vk.vkCmdBindDescriptorSets(
+            command_buffer,
+            vk.VK_PIPELINE_BIND_POINT_COMPUTE,
+            pipeline_layout,
+            0,
+            1,
+            [descriptor_set],
+            0,
+            None,
+        )
+        gx = (global_size + self.config.workgroup[0] - 1) // self.config.workgroup[0]
+        vk.vkCmdDispatch(command_buffer, gx, self.config.workgroup[1], self.config.workgroup[2])
+
+        # Barrier to make shader writes visible to transfer
+        barriers_out = [
+            vk.VkBufferMemoryBarrier(
+                sType=vk.VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
+                srcAccessMask=vk.VK_ACCESS_SHADER_WRITE_BIT,
+                dstAccessMask=vk.VK_ACCESS_TRANSFER_READ_BIT,
+                srcQueueFamilyIndex=vk.VK_QUEUE_FAMILY_IGNORED,
+                dstQueueFamilyIndex=vk.VK_QUEUE_FAMILY_IGNORED,
+                buffer=device_out[0],
+                offset=0,
+                size=sign_nbytes,
+            ),
+            vk.VkBufferMemoryBarrier(
+                sType=vk.VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
+                srcAccessMask=vk.VK_ACCESS_SHADER_WRITE_BIT,
+                dstAccessMask=vk.VK_ACCESS_TRANSFER_READ_BIT,
+                srcQueueFamilyIndex=vk.VK_QUEUE_FAMILY_IGNORED,
+                dstQueueFamilyIndex=vk.VK_QUEUE_FAMILY_IGNORED,
+                buffer=device_out[1],
+                offset=0,
+                size=support_nbytes,
+            ),
+        ]
+        vk.vkCmdPipelineBarrier(
+            command_buffer,
+            vk.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            vk.VK_PIPELINE_STAGE_TRANSFER_BIT,
+            0,
+            0,
+            None,
+            len(barriers_out),
+            barriers_out,
+            0,
+            None,
+        )
+
+        # Copy outputs back to staging
+        vk.vkCmdCopyBuffer(
+            command_buffer,
+            device_out[0],
+            staging_out[0],
+            1,
+            [vk.VkBufferCopy(srcOffset=0, dstOffset=0, size=sign_nbytes)],
+        )
+        vk.vkCmdCopyBuffer(
+            command_buffer,
+            device_out[1],
+            staging_out[1],
+            1,
+            [vk.VkBufferCopy(srcOffset=0, dstOffset=0, size=support_nbytes)],
+        )
+
+        vk.vkEndCommandBuffer(command_buffer)
         submit_info = vk.VkSubmitInfo(
             sType=vk.VK_STRUCTURE_TYPE_SUBMIT_INFO,
             commandBufferCount=1,

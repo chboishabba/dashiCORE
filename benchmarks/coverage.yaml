@@ -11,7 +11,7 @@ modules:
 
   dashi_core.kernel:
     Kernel.__call__:
-      workloads: [pipeline_1pass, pipeline_multipass, stencil_dense_iterated]
+      workloads: [pipeline_1pass, pipeline_multipass, stencil_dense_iterated, alu_dense_burn]
       axes: [N, passes, sparsity, pattern]
       correctness: [parity_cpu_gpu]
 

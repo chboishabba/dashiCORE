@@ -316,7 +316,7 @@ Benchmark planning assets:
 
 - These RX 580 runs confirm: for small/light kernels, Vulkan dispatch/transfer overhead dominates; batching amortizes linearly and does not overturn CPU > GPU on this hardware. This is expected and acceptable for dashiCORE, whose priority is semantic parity, not early GPU speedups.
 - Guideline: if a GPU backend is slower than CPU for a given kernel, treat it as a performance observation, not a correctness failure. Use CPU as the semantic reference; expect GPU wins only for sufficiently large/dense workloads where overhead is amortized.
-- For a GPU-favored regime, use dense, iterated workloads (e.g., `--workload stencil_dense_iterated --iterations 10+` on large sizes) to increase arithmetic intensity while keeping semantics identical.
+- For a GPU-favored regime, start with dense workloads (e.g., `--workload stencil_dense_iterated --iterations 10+` on large sizes) and an ALU-heavy single-pass workload (`--workload alu_dense_burn` with large sizes/rounds once added) to raise arithmetic intensity without changing semantics. Vulkan benchmarks now record `--memory-mode host_visible|device_local`; device-local mode uses staging to keep compute buffers in VRAM during timing (submit→fence), separating compute from PCIe/zero-copy overhead.
 
 Latest dense, iterated sweep (RX 580, `stencil_dense_iterated`, `iterations=10`, `batches=4`, sparsity 0.0; medians, ms):
 
@@ -327,3 +327,21 @@ Latest dense, iterated sweep (RX 580, `stencil_dense_iterated`, `iterations=10`,
 | 262,144 | 122.13 | 853.85 |
 
 Parity remains perfect (hashes match); even at higher intensity the RX 580 stays slower than the i7-7700K. Treat this as a performance observation; correctness is validated.
+
+Timing scope note (current runs): the Vulkan numbers above are end-to-end wall times with host-visible buffers and still include submission/synchronization cost. Next steps for a true GPU-favored crossover and compute isolation:
+
+- Split timing into `submit_to_fence_ms` (dispatch→fence only) and `wall_ms` (includes staging/readback/hash); report both.
+- Enforce a single fence wait per timed run (record N dispatches, submit once, wait once). Any per-dispatch fence wait should be treated as a bug and logged.
+- Keep host-visible “zero-copy” mode as a separate, explicitly slower regime on discrete GPUs; report which mode is used.
+- Make the ALU-heavy single-pass workload (`alu_dense_burn`) truly GPU-favored: rounds axis (e.g., 1 vs 4096) with ≥1M elements in device-local mode. A rounds sweep should show linear scaling if compute is being measured.
+
+Latest Vulkan sweep with host-visible vs device-local staging (sign_flip shader):
+
+| workload (batch=4) | size     | CPU | Vulkan host_visible | Vulkan device_local |
+| ------------------ | -------: | --: | ------------------: | ------------------: |
+| stencil_dense_iterated, iters=10, sparsity=0.0 | 65,536   | 29.66 | 383.25 | 411.24 |
+| alu_dense_burn, iters=1, sparsity=0.0          | 1,048,576 | 56.68 | 224.18 | 244.81 |
+| alu_dense_burn, iters=1, sparsity=0.0          | 4,194,304 | 245.37 | 884.80 | 867.47 |
+| alu_dense_burn, iters=1, sparsity=0.0          | 16,777,216 | 1,042.57 | 3,741.79 | 3,673.29 |
+
+Takeaways: device-local staging is wired but still dominated by submission/transfer overhead for these light kernels; GPU remains slower than CPU even for the larger ALU burn sizes. Compute-only timing and a heavier ALU shader remain the next levers to expose a GPU-favored crossover.

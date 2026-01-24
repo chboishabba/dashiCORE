@@ -63,10 +63,12 @@ class BenchResult:
     block_elems: Optional[int]
     device: Optional[str]
     run: int
+    memory_mode: Optional[str]
     t_encode_ms: float
     t_kernel_ms: float
     t_decode_ms: float
     t_total_ms: float
+    t_gpu_compute_ms: Optional[float]
     hash_out: str
     hash_ref: str
     match: bool
@@ -101,10 +103,12 @@ def bench_pq_roundtrip(sizes: Sequence[int], sparsities: Sequence[float], repeat
                     block_elems=None,
                     device=None,
                     run=run,
+                    memory_mode=None,
                     t_encode_ms=t_encode,
                     t_kernel_ms=0.0,
                     t_decode_ms=t_decode,
                     t_total_ms=t_encode + t_decode,
+                    t_gpu_compute_ms=None,
                     hash_out=_hash_array(decoded.to_signed()),
                     hash_ref=ref_hash,
                     match=bool(match),
@@ -160,10 +164,12 @@ def bench_kernel_dense_vs_pq(
                     block_elems=None,
                     device=None,
                     run=run,
+                    memory_mode=None,
                     t_encode_ms=0.0,
                     t_kernel_ms=dense_time,
                     t_decode_ms=0.0,
                     t_total_ms=dense_time,
+                    t_gpu_compute_ms=None,
                     hash_out=dense_hash,
                     hash_ref=ref_hash,
                     match=bool(dense_hash == ref_hash),
@@ -179,10 +185,12 @@ def bench_kernel_dense_vs_pq(
                     block_elems=None,
                     device=None,
                     run=run,
+                    memory_mode=None,
                     t_encode_ms=t_encode,
                     t_kernel_ms=t_kernel,
                     t_decode_ms=t_decode,
                     t_total_ms=t_encode + t_decode + t_kernel,
+                    t_gpu_compute_ms=None,
                     hash_out=pq_hash,
                     hash_ref=ref_hash,
                     match=bool(pq_hash == ref_hash),
@@ -249,10 +257,12 @@ def bench_pq_block_sweep(
                         block_elems=block_elems,
                         device=None,
                         run=run,
+                        memory_mode=None,
                         t_encode_ms=t_enc,
                         t_kernel_ms=t_ker,
                         t_decode_ms=t_dec,
                         t_total_ms=t_enc + t_dec + t_ker,
+                        t_gpu_compute_ms=None,
                         hash_out=pq_hash,
                         hash_ref=ref_hash,
                         match=bool(pq_hash == ref_hash),
@@ -312,10 +322,17 @@ def bench_kernel_dense_vulkan(
     shader: Path,
     spv: Optional[Path],
     device_index: int,
+    memory_mode: str = "host_visible",
 ):
     """Benchmark dense Vulkan kernel (sign-flip) vs dense CPU reference."""
     results: List[str] = []
-    meta = {"cpu": cpu_cache_info(), "vulkan": _vulkan_device_info(device_index), "iterations": iterations, "workload": workload}
+    meta = {
+        "cpu": cpu_cache_info(),
+        "vulkan": _vulkan_device_info(device_index),
+        "iterations": iterations,
+        "workload": workload,
+        "memory_mode": memory_mode,
+    }
     try:
         import vulkan as vk  # noqa: F401
     except ImportError as exc:
@@ -329,7 +346,7 @@ def bench_kernel_dense_vulkan(
     backend = register_vulkan_backend(
         name="bench_vulkan_dense",
         config=config,
-        dispatch_config=VulkanDispatchConfig(device_index=device_index),
+        dispatch_config=VulkanDispatchConfig(device_index=device_index, memory_mode=memory_mode),
         allow_fallback=False,
     )
     kernel = make_vulkan_kernel(backend)
@@ -364,15 +381,17 @@ def bench_kernel_dense_vulkan(
                         block_elems=None,
                         device=meta["vulkan"]["device_name"] if meta["vulkan"] else None,
                         run=run,
+                        memory_mode=memory_mode,
                         t_encode_ms=0.0,
                         t_kernel_ms=t_kernel,
                         t_decode_ms=0.0,
                         t_total_ms=t_kernel,
+                        t_gpu_compute_ms=t_kernel,  # best-effort proxy; kernel() is synchronous
                         hash_out=vk_hash,
                         hash_ref=ref_hash,
                         match=bool(vk_hash == ref_hash),
-                    meta=meta,
-                )
+                        meta=meta,
+                    )
                     res_ref = BenchResult(
                         suite="kernel_dense_vulkan",
                         mode="cpu_dense_ref",
@@ -383,10 +402,12 @@ def bench_kernel_dense_vulkan(
                         block_elems=None,
                         device=None,
                         run=run,
+                        memory_mode=None,
                         t_encode_ms=0.0,
                         t_kernel_ms=ref_time,
                         t_decode_ms=0.0,
                         t_total_ms=ref_time,
+                        t_gpu_compute_ms=None,
                         hash_out=ref_hash,
                         hash_ref=ref_hash,
                         match=True,
@@ -434,6 +455,13 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p.add_argument("--device-index", type=int, default=0)
     p.add_argument("--batches", type=int, nargs="+", default=[1], help="Repeat kernel N times per timing (amortize dispatch).")
     p.add_argument("--iterations", type=int, default=1, help="Number of times to apply the kernel per batch (increase intensity).")
+    p.add_argument(
+        "--memory-mode",
+        type=str,
+        default="host_visible",
+        choices=["host_visible", "device_local"],
+        help="Benchmark memory mode hint (informational; device_local assumes staging outside timed region).",
+    )
     return p.parse_args(argv)
 
 
@@ -480,6 +508,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             shader=args.shader,
             spv=args.spv,
             device_index=args.device_index,
+            memory_mode=args.memory_mode,
         )
     else:
         raise ValueError(f"Unknown suite: {args.suite}")

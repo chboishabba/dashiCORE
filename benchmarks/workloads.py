@@ -106,6 +106,11 @@ WORKLOADS: Dict[str, Workload] = {
         generator=lambda n, sparsity, seed: _blocky_tiles(n, sparsity=0.0, seed=seed, tile_size=1),
         description="Fully dense ±1 field intended for iterated, high-intensity stencil kernels",
     ),
+    "alu_dense_burn": Workload(
+        name="alu_dense_burn",
+        generator=lambda n, sparsity, seed: _blocky_tiles(n, sparsity=0.0, seed=seed, tile_size=1),
+        description="Fully dense ±1 field intended for ALU-heavy single-pass kernels",
+    ),
 }
 
 
