@@ -1,0 +1,260 @@
+dashiCORE_math_spec:
+  version: "0.1.0"
+  status: "normative"
+  scope: "domain-agnostic core mathematics"
+  rule: "If it is not specified here, it is not part of dashiCORE."
+
+  ########################################
+  # 1. Domains and Shapes
+  ########################################
+
+  domains:
+    Omega:
+      description: >
+        Abstract finite index domain. May represent a grid, graph, mesh,
+        or any finite indexable set.
+      assumptions:
+        - finite
+        - indexable
+        - stable shape unless explicitly lifted/projected
+
+  shape_contract:
+    shape_preserving_ops:
+      rule: "shape(output) == shape(input)"
+      applies_to:
+        - carrier_ops
+        - kernel_apply
+        - defect_compute
+        - admissibility_apply
+    shape_changing_ops:
+      allowed_only_for:
+        - lift
+        - project
+
+  ########################################
+  # 2. Carrier
+  ########################################
+
+  carrier:
+    type: "balanced_ternary"
+    symbol: "T"
+    values: [-1, 0, 1]
+
+    factorisation:
+      support:
+        type: "boolean"
+        definition: "support[i] = (signed[i] != 0)"
+      sign:
+        type: "int"
+        allowed_values: [-1, 1]
+        defined_when: "support[i] == true"
+
+    reconstruction:
+      rule: >
+        signed[i] = 0 if support[i] == false
+        else sign[i]
+
+    invariants:
+      - support in {0,1}
+      - if support == 1 then sign in {-1,1}
+      - if support == 0 then sign is dont_care
+
+    forbidden_representations:
+      - real_valued_mass_fields
+      - probabilistic_logits
+      - soft_masks
+      - conflated_existence_orientation
+
+  ########################################
+  # 3. Kernel
+  ########################################
+
+  kernel:
+    description: "Local consistency operator"
+    mapping: "T^Omega -> T^Omega"
+
+    io_contract:
+      input: "valid_carrier"
+      output: "valid_carrier"
+      shape_preserved: true
+
+    properties:
+      deterministic: true
+      algebraic_character:
+        must_declare_one_of:
+          - idempotent
+          - contractive
+
+    idempotent_definition:
+      rule: "K(K(x)) == K(x)"
+
+    contractive_definition:
+      rule: "D(x) >= D(K(x)) >= D(K(K(x))) >= ..."
+
+    support_rule:
+      default: "support_out[i] <= support_in[i]"
+      support_creation:
+        allowed: false
+        note: "Support creation forbidden in Sprint 0 baseline"
+
+  ########################################
+  # 4. Defect
+  ########################################
+
+  defect:
+    role: "diagnostic_consistency_measure"
+
+    local_defect:
+      mapping: "(T^Omega, T^Omega) -> R_nonnegative^Omega"
+      invariants:
+        - non_negative
+        - zero_iff_locally_consistent
+
+    aggregate_defect:
+      mapping: "R_nonnegative^Omega -> R_nonnegative"
+      norms_allowed:
+        - L1
+        - L2
+        - Linf
+      invariants:
+        - zero_iff_all_local_zero
+
+    fixed_point_definition:
+      rule: "D(x) == 0 iff K(x) == x"
+
+    forbidden_uses:
+      - optimisation_objective
+      - gradient_signal
+      - state_mutation
+
+  ########################################
+  # 5. Admissibility (Quotient Semantics)
+  ########################################
+
+  admissibility:
+    description: "Redundancy quotient over representations"
+
+    transforms:
+      symbol: "G"
+      mapping: "T^Omega -> T^Omega"
+
+    equivalence_relation:
+      definition: "x ~ y iff exists g in G: y = g(x)"
+      properties:
+        - reflexive
+        - symmetric
+        - transitive
+
+    invariants:
+      defect:
+        rule: "D(x) == D(g(x))"
+      mdl:
+        rule: "MDL(x) == MDL(g(x)) or equal under canonical_form"
+
+    kernel_compatibility:
+      rule: "K(g(x)) ~ g(K(x))"
+
+  ########################################
+  # 6. MDL (Minimum Description Length)
+  ########################################
+
+  mdl:
+    role: "representation_preference"
+
+    mapping: "Representation -> R_nonnegative"
+
+    invariants:
+      - non_negative
+      - deterministic
+      - admissibility_invariant_or_canonicalised
+
+    comparison:
+      output: ["A", "B", "tie"]
+      rule: "deterministic_total_order_with_ties"
+
+    forbidden_uses:
+      - statistical_loss
+      - training_objective
+
+  ########################################
+  # 7. Hierarchy (M-Levels)
+  ########################################
+
+  hierarchy:
+    levels: "M_n for n >= 0"
+
+    lift:
+      mapping: "M_n -> M_{n+k}"
+      explicit: true
+      invariants:
+        - admissibility_preserved
+        - no_spurious_defect
+
+    project:
+      mapping: "M_{n+k} -> M_n"
+      explicit: true
+      invariants:
+        - no_spurious_defect
+
+    roundtrip:
+      rule: "Project(Lift(x)) ~ x"
+
+    forbidden:
+      - implicit_cross_level_operations
+      - hierarchy_leakage
+
+  ########################################
+  # 8. Backend Semantics
+  ########################################
+
+  backend:
+    role: "execution_only"
+
+    allowed_to_change:
+      - memory_layout
+      - parallelism
+      - scheduling
+      - device_placement
+
+    forbidden_to_change:
+      - io_shapes
+      - carrier_semantics
+      - defect_values
+      - mdl_ordering
+      - determinism
+
+    parity_requirement:
+      rule: "All backends must be observationally equivalent"
+
+  ########################################
+  # 9. Compliance
+  ########################################
+
+  compliance:
+    required_sections:
+      - carrier
+      - kernel
+      - defect
+      - admissibility
+      - mdl
+      - hierarchy
+      - backend
+
+    compliance_rule: >
+      An implementation is dashiCORE-compliant iff all invariants
+      specified in this document are enforced and tested.
+
+  ########################################
+  # 10. Test Mapping
+  ########################################
+
+  test_mapping:
+    carrier: "tests/carrier/*"
+    kernel: "tests/kernel/*"
+    defect: "tests/defect/*"
+    admissibility: "tests/admissibility/*"
+    mdl: "tests/mdl/*"
+    hierarchy: "tests/hierarchy/*"
+    backend: "tests/backend/*"
+    violations: "tests/violations/*"
+    parity: "tests/parity/*"

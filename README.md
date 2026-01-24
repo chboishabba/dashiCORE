@@ -242,3 +242,10 @@ If something feels clever, it probably doesn’t belong here.
 * [ ] M-level composition helpers
 * [ ] Minimal reference tests (invariance + idempotence)
 
+---
+
+## Implementation Scaffold (Sprints 0–2)
+
+* Code lives under `dashi_core/` (`carrier.py`, `kernel.py`, `defect.py`, `admissibility.py`, `mdl.py`, `hierarchy.py`); mock kernels reside in `dashi_core/testing/mock_kernels.py`.
+* Backends are explicit: `dashi_core.backend` exposes CPU + accelerated-compatible backends with `set_backend("cpu"|"accelerated")`; selection is deterministic and global.
+* Tests mirror theory under `tests/` (`carrier/`, `kernel/`, `defect/`, `admissibility/`, `mdl/`, `hierarchy/`, `backend/`, `violations/`, `reproducibility/`); run with `python -m pytest`.

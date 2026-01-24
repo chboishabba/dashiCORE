@@ -1264,3 +1264,305 @@ If all boxes are checked, you’re ready.
 
 > **Once shape and invariants are fixed, speed is easy.
 > Once speed is fixed, shape is impossible to change.**
+
+
+
+
+# dashiCORE — Minimal Visual & Log Output Specification
+
+> **Status:** Normative
+> **Scope:** Debugging, validation, and parity only
+> **Rule:** Visuals and logs must *never* influence semantics.
+
+---
+
+## 0. Purpose
+
+Visuals and logs in dashiCORE exist to:
+
+* Confirm **invariants**
+* Debug **violations**
+* Compare **backends**
+* Observe **convergence**
+
+They do **not** exist to:
+
+* Explain domain meaning
+* Communicate results
+* Explore data
+* Tune parameters
+
+If you feel tempted to “look at the structure,” you are already outside CORE.
+
+---
+
+## 1. Logging Principles (Hard Rules)
+
+1. Logs are **read-only observables**
+2. Logs must be **deterministic**
+3. Logs must be **backend-invariant**
+4. Logs must be **shape-aware**
+5. Logs must never alter execution order or precision
+
+If disabling logging changes outputs, that is a bug.
+
+---
+
+## 2. Minimal Log Channels (Exactly These)
+
+dashiCORE defines **four log channels**, no more.
+
+### 2.1 `STATE`
+
+Purpose: prove shape + carrier validity.
+
+**Required fields**
+
+```text
+- shape
+- support_count
+- sign_balance
+```
+
+**Example**
+
+```text
+STATE | shape=(64,64) | support=1834 | sign=(+912 / -922)
+```
+
+---
+
+### 2.2 `KERNEL`
+
+Purpose: prove kernel semantics.
+
+**Required fields**
+
+```text
+- kernel_name
+- idempotent
+- iteration_index (if applicable)
+```
+
+**Example**
+
+```text
+KERNEL | ClampKernel | idempotent=True | iter=0
+```
+
+---
+
+### 2.3 `DEFECT`
+
+Purpose: prove convergence and fixed-point logic.
+
+**Required fields**
+
+```text
+- local_nonzero_count
+- aggregate_value
+- monotone (bool)
+```
+
+**Example**
+
+```text
+DEFECT | nonzero=421 | D=17.0 | monotone=True
+```
+
+---
+
+### 2.4 `BACKEND`
+
+Purpose: prove backend invisibility.
+
+**Required fields**
+
+```text
+- backend_name
+- precision
+- deterministic (bool)
+```
+
+**Example**
+
+```text
+BACKEND | cpu | float64 | deterministic=True
+```
+
+---
+
+## 3. Canonical Log Record Format
+
+All logs must be **single-line, machine-parseable**.
+
+Canonical format:
+
+```text
+<TIMESTAMP?> <CHANNEL> | <key>=<value> | <key>=<value> ...
+```
+
+Rules:
+
+* Timestamp optional but consistent
+* No free text
+* No multiline output
+* Stable key ordering per channel
+
+---
+
+## 4. Minimal Visual Outputs (Exactly Two)
+
+Visuals are optional but **standardised** when enabled.
+
+### 4.1 Support Mask View
+
+Purpose: prove **existence geometry**, nothing else.
+
+**Definition**
+
+* Binary image / plot
+* `True` = black
+* `False` = white
+* No interpolation
+* No smoothing
+
+This visual answers only:
+
+> “Where does structure exist?”
+
+---
+
+### 4.2 Defect Heatmap
+
+Purpose: prove **local inconsistency distribution**.
+
+**Definition**
+
+* Nonnegative scalar field
+* Zero = white
+* Higher = darker
+* Fixed colormap
+* Linear scale only
+
+This visual answers only:
+
+> “Where is the kernel unhappy?”
+
+---
+
+## 5. Forbidden Visuals (Hard Ban)
+
+The following must **never** appear in dashiCORE:
+
+* RGB composites
+* Overlays of multiple semantics
+* Vector fields
+* Flow arrows
+* Animations
+* Learned embeddings
+* Domain-specific colour maps
+* Any plot that requires explanation
+
+If you need a legend, the visual does not belong in CORE.
+
+---
+
+## 6. Iteration Trace (Optional, Strict)
+
+For non-idempotent kernels, a **minimal iteration trace** is allowed.
+
+**Allowed**
+
+```text
+iter | support | defect
+----------------------
+0    | 1834    | 17.0
+1    | 1821    | 12.0
+2    | 1803    |  0.0
+```
+
+Rules:
+
+* Monotonicity must be visible
+* Termination must be explicit
+* No heuristics logged
+
+---
+
+## 7. Backend Parity Visual Test (Critical)
+
+When comparing backends, visuals must satisfy:
+
+```text
+visual(cpu(x)) == visual(gpu(x))
+```
+
+Byte-for-byte identical images.
+
+If visuals differ but numbers don’t:
+
+> The backend is wrong.
+
+---
+
+## 8. Minimal Failure Visuals
+
+On invariant violation, a **single snapshot** is allowed:
+
+* support mask
+* defect heatmap
+* last kernel name
+* last backend name
+
+This snapshot exists only to debug the violation.
+
+---
+
+## 9. Mapping to Tests
+
+| Spec Section | Test Coverage               |
+| ------------ | --------------------------- |
+| STATE logs   | shape + carrier tests       |
+| KERNEL logs  | idempotence tests           |
+| DEFECT logs  | monotonicity tests          |
+| BACKEND logs | parity tests                |
+| visuals      | backend parity visual tests |
+
+Visual generation must be **triggered by tests**, not by default.
+
+---
+
+## 10. Configuration Surface (Minimal)
+
+One flag only:
+
+```python
+dashi_core.set_debug(mode="off" | "log" | "visual")
+```
+
+Defaults to `"off"`.
+
+No granular toggles.
+
+---
+
+## 11. One-Line Philosophy (Put in the File)
+
+> **CORE visuals exist to falsify invariants,
+> not to illustrate ideas.**
+
+---
+
+## Final Sanity Check
+
+If someone asks:
+
+> “What does this picture *mean*?”
+
+The answer should be:
+
+> “It doesn’t. It only shows whether the math is behaving.”
+
+If that sentence is not true, the visual is illegal.
+
