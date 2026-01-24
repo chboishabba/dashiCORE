@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 import sys
 import time
 from datetime import datetime
@@ -29,8 +30,8 @@ from dashi_core.kernel import Kernel  # noqa: E402
 from benchmarks.hardware import cpu_cache_info, recommend_pq_block_elems  # noqa: E402
 from pq import decode_pq_to_carrier, encode_carrier_to_pq  # noqa: E402
 from gpu_common_methods import compile_shader  # noqa: E402
-from gpu_vulkan_backend import make_vulkan_kernel, register_vulkan_backend, VulkanKernelConfig  # noqa: E402
-from gpu_vulkan_dispatcher import VulkanDispatchConfig  # noqa: E402
+from gpu_vulkan_backend import VulkanKernelConfig  # noqa: E402
+from gpu_vulkan_dispatcher import DispatchTiming, VulkanCarrierDispatcher, VulkanDispatchConfig  # noqa: E402
 import workloads  # noqa: E402
 
 
@@ -69,6 +70,9 @@ class BenchResult:
     t_decode_ms: float
     t_total_ms: float
     t_gpu_compute_ms: Optional[float]
+    t_submit_to_fence_ms: Optional[float]
+    fence_waits: Optional[int]
+    dispatches_per_run: Optional[int]
     hash_out: str
     hash_ref: str
     match: bool
@@ -109,6 +113,9 @@ def bench_pq_roundtrip(sizes: Sequence[int], sparsities: Sequence[float], repeat
                     t_decode_ms=t_decode,
                     t_total_ms=t_encode + t_decode,
                     t_gpu_compute_ms=None,
+                    t_submit_to_fence_ms=None,
+                    fence_waits=None,
+                    dispatches_per_run=None,
                     hash_out=_hash_array(decoded.to_signed()),
                     hash_ref=ref_hash,
                     match=bool(match),
@@ -170,6 +177,9 @@ def bench_kernel_dense_vs_pq(
                     t_decode_ms=0.0,
                     t_total_ms=dense_time,
                     t_gpu_compute_ms=None,
+                    t_submit_to_fence_ms=None,
+                    fence_waits=None,
+                    dispatches_per_run=None,
                     hash_out=dense_hash,
                     hash_ref=ref_hash,
                     match=bool(dense_hash == ref_hash),
@@ -191,6 +201,9 @@ def bench_kernel_dense_vs_pq(
                     t_decode_ms=t_decode,
                     t_total_ms=t_encode + t_decode + t_kernel,
                     t_gpu_compute_ms=None,
+                    t_submit_to_fence_ms=None,
+                    fence_waits=None,
+                    dispatches_per_run=None,
                     hash_out=pq_hash,
                     hash_ref=ref_hash,
                     match=bool(pq_hash == ref_hash),
@@ -263,6 +276,9 @@ def bench_pq_block_sweep(
                         t_decode_ms=t_dec,
                         t_total_ms=t_enc + t_dec + t_ker,
                         t_gpu_compute_ms=None,
+                        t_submit_to_fence_ms=None,
+                        fence_waits=None,
+                        dispatches_per_run=None,
                         hash_out=pq_hash,
                         hash_ref=ref_hash,
                         match=bool(pq_hash == ref_hash),
@@ -296,7 +312,22 @@ def _vulkan_device_info(device_index: int):
         if not devices or device_index >= len(devices):
             return None
         props = vk.vkGetPhysicalDeviceProperties(devices[device_index])
-        return {"device_name": vk.string(props.deviceName), "api_version": props.apiVersion}
+        raw_name = getattr(props, "deviceName", b"")
+        if isinstance(raw_name, (bytes, bytearray)):
+            try:
+                name = raw_name.split(b"\x00", 1)[0].decode("utf-8", "replace")
+            except Exception:
+                name = str(raw_name)
+        else:
+            try:
+                name = vk.string(raw_name)
+            except Exception:
+                name = str(raw_name)
+        return {
+            "device_name": name,
+            "api_version": getattr(props, "apiVersion", None),
+            "driver_version": getattr(props, "driverVersion", None),
+        }
     except Exception:
         return None
     finally:
@@ -323,98 +354,127 @@ def bench_kernel_dense_vulkan(
     spv: Optional[Path],
     device_index: int,
     memory_mode: str = "host_visible",
+    cpu_only: bool = False,
+    gpu_only: bool = False,
+    log_process_cpu: bool = False,
 ):
     """Benchmark dense Vulkan kernel (sign-flip) vs dense CPU reference."""
+    if cpu_only and gpu_only:
+        raise ValueError("cpu_only and gpu_only cannot both be set")
+
     results: List[str] = []
     meta = {
-        "cpu": cpu_cache_info(),
-        "vulkan": _vulkan_device_info(device_index),
+        "cpu": None if gpu_only else cpu_cache_info(),
+        "vulkan": None,
         "iterations": iterations,
         "workload": workload,
         "memory_mode": memory_mode,
     }
-    try:
-        import vulkan as vk  # noqa: F401
-    except ImportError as exc:
-        raise RuntimeError("python-vulkan not installed; cannot run Vulkan benchmarks") from exc
 
+    dispatcher: Optional[VulkanCarrierDispatcher] = None
     shader = Path(shader)
     spv_path = Path(spv) if spv else shader.with_suffix(".spv")
-    compile_shader(shader, spv_path)
 
-    config = VulkanKernelConfig(shader_path=shader, spv_path=spv_path, compile_on_dispatch=False)
-    backend = register_vulkan_backend(
-        name="bench_vulkan_dense",
-        config=config,
-        dispatch_config=VulkanDispatchConfig(device_index=device_index, memory_mode=memory_mode),
-        allow_fallback=False,
-    )
-    kernel = make_vulkan_kernel(backend)
+    if not cpu_only:
+        try:
+            import vulkan as vk  # noqa: F401
+        except ImportError as exc:
+            raise RuntimeError("python-vulkan not installed; cannot run GPU benchmarks") from exc
+        meta["vulkan"] = _vulkan_device_info(device_index)
+        if meta["vulkan"] is None:
+            raise RuntimeError(
+                "Vulkan device unavailable (python-vulkan present but no device enumerated). "
+                "Set VK_ICD_FILENAMES or verify your driver installation before running GPU benchmarks."
+            )
+        compile_shader(shader, spv_path)
+        config = VulkanKernelConfig(shader_path=shader, spv_path=spv_path, compile_on_dispatch=False)
+        dispatch_config = VulkanDispatchConfig(device_index=device_index, memory_mode=memory_mode)
+        dispatcher = VulkanCarrierDispatcher(config=config, dispatch_config=dispatch_config)
+
     ref_kernel = SignFlipKernel()
 
     for size in sizes:
         for sparsity in sparsities:
             carrier = _make_carrier(size, sparsity, seed, workload)
             for batch_count in batches:
-                ref_start = _now_ms()
-                ref_out = None
-                for _ in range(batch_count):
-                    for _ in range(iterations):
+                dispatches_per_run = batch_count * iterations
+                ref_time = None
+                ref_hash = ""
+                if not gpu_only:
+                    ref_start = _now_ms()
+                    ref_out = None
+                    for _ in range(dispatches_per_run):
                         ref_out = ref_kernel(carrier)
-                ref_time = _now_ms() - ref_start
-                ref_hash = _hash_array(ref_out.to_signed()) if ref_out is not None else ""
+                    ref_time = _now_ms() - ref_start
+                    ref_hash = _hash_array(ref_out.to_signed()) if ref_out is not None else ""
+                else:
+                    # still compute reference hash for GPU-only correctness check
+                    ref_out = ref_kernel(carrier)
+                    ref_hash = _hash_array(ref_out.to_signed())
                 for run in range(repeats):
-                    start = _now_ms()
-                    vk_out = None
-                    for _ in range(batch_count):
-                        for _ in range(iterations):
-                            vk_out = kernel(carrier)
-                    t_kernel = _now_ms() - start
-                    vk_hash = _hash_array(vk_out.to_signed()) if vk_out is not None else ""
-                    res = BenchResult(
-                        suite="kernel_dense_vulkan",
-                        mode="vulkan_dense",
-                        backend="vulkan",
-                        size=size,
-                        sparsity=sparsity,
-                        batch_count=batch_count,
-                        block_elems=None,
-                        device=meta["vulkan"]["device_name"] if meta["vulkan"] else None,
-                        run=run,
-                        memory_mode=memory_mode,
-                        t_encode_ms=0.0,
-                        t_kernel_ms=t_kernel,
-                        t_decode_ms=0.0,
-                        t_total_ms=t_kernel,
-                        t_gpu_compute_ms=t_kernel,  # best-effort proxy; kernel() is synchronous
-                        hash_out=vk_hash,
-                        hash_ref=ref_hash,
-                        match=bool(vk_hash == ref_hash),
-                        meta=meta,
-                    )
-                    res_ref = BenchResult(
-                        suite="kernel_dense_vulkan",
-                        mode="cpu_dense_ref",
-                        backend="cpu",
-                        size=size,
-                        sparsity=sparsity,
-                        batch_count=batch_count,
-                        block_elems=None,
-                        device=None,
-                        run=run,
-                        memory_mode=None,
-                        t_encode_ms=0.0,
-                        t_kernel_ms=ref_time,
-                        t_decode_ms=0.0,
-                        t_total_ms=ref_time,
-                        t_gpu_compute_ms=None,
-                        hash_out=ref_hash,
-                        hash_ref=ref_hash,
-                        match=True,
-                        meta=meta,
-                    )
-                    results.append(res_ref.to_json())
-                    results.append(res.to_json())
+                    meta_run = meta
+                    if log_process_cpu:
+                        cpu_pct = _process_cpu_pct()
+                        meta_run = {**meta, "process_cpu_pct": cpu_pct}
+                    if not gpu_only:
+                        res_ref = BenchResult(
+                            suite="kernel_dense_vulkan",
+                            mode="cpu_dense_ref",
+                            backend="cpu",
+                            size=size,
+                            sparsity=sparsity,
+                            batch_count=batch_count,
+                            block_elems=None,
+                            device=None,
+                            run=run,
+                            memory_mode=None,
+                            t_encode_ms=0.0,
+                            t_kernel_ms=ref_time or 0.0,
+                            t_decode_ms=0.0,
+                            t_total_ms=ref_time or 0.0,
+                            t_gpu_compute_ms=None,
+                            t_submit_to_fence_ms=None,
+                            fence_waits=None,
+                            dispatches_per_run=dispatches_per_run,
+                            hash_out=ref_hash,
+                            hash_ref=ref_hash,
+                            match=True,
+                            meta=meta_run,
+                        )
+                        results.append(res_ref.to_json())
+
+                    if not cpu_only:
+                        vk_out, timing = dispatcher.dispatch_batched(
+                            carrier, dispatches=dispatches_per_run, collect_timing=True
+                        )
+                        submit_ms = timing.submit_to_fence_ms if timing else None
+                        wall_ms = timing.wall_ms if timing else None
+                        vk_hash = _hash_array(vk_out.to_signed()) if vk_out is not None else ""
+                        res = BenchResult(
+                            suite="kernel_dense_vulkan",
+                            mode="vulkan_dense",
+                            backend="vulkan",
+                            size=size,
+                            sparsity=sparsity,
+                            batch_count=batch_count,
+                            block_elems=None,
+                            device=meta["vulkan"]["device_name"] if meta["vulkan"] else None,
+                            run=run,
+                            memory_mode=memory_mode,
+                            t_encode_ms=0.0,
+                            t_kernel_ms=wall_ms or 0.0,
+                            t_decode_ms=0.0,
+                            t_total_ms=wall_ms or 0.0,
+                            t_gpu_compute_ms=submit_ms,
+                            t_submit_to_fence_ms=submit_ms,
+                            fence_waits=timing.fence_waits if timing else None,
+                            dispatches_per_run=dispatches_per_run,
+                            hash_out=vk_hash,
+                            hash_ref=ref_hash,
+                            match=bool(vk_hash == ref_hash),
+                            meta=meta_run,
+                        )
+                        results.append(res.to_json())
     _emit(out, results)
 
 
@@ -435,6 +495,35 @@ def _timestamped_path(path: Optional[Path], suite: str) -> Path:
     return path / f"{suite}-{ts}.jsonl"
 
 
+def _configure_threads(threads: Optional[int]) -> None:
+    """Optionally constrain CPU threading for fair comparisons."""
+    if threads is None or threads <= 0:
+        return
+    for key in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+        os.environ[key] = str(threads)
+    try:
+        # numpy 1.25+ exposes set_num_threads for OpenBLAS/BLAS backends
+        import numpy as _np
+
+        if hasattr(_np, "set_num_threads"):
+            _np.set_num_threads(threads)
+    except Exception:
+        pass
+
+
+def _process_cpu_pct() -> Optional[float]:
+    """Return instantaneous %CPU for current PID via ps, or None on failure."""
+    try:
+        out = subprocess.check_output(
+            ["ps", "-p", str(os.getpid()), "-o", "%cpu", "--noheader"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+        return float(out.strip().split()[0])
+    except Exception:
+        return None
+
+
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="dashiCORE benchmark runner (dense vs PQ).")
     p.add_argument(
@@ -449,6 +538,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--out", type=Path, default=None)
     p.add_argument("--workload", type=str, default="random_sparse", choices=list(workloads.names()))
+    p.add_argument("--threads", type=int, default=None, help="Optional CPU thread cap (sets OMP/BLAS env + numpy.set_num_threads when available).")
     # Vulkan options
     p.add_argument("--shader", type=Path, default=ROOT / "gpu_shaders" / "sign_flip.comp")
     p.add_argument("--spv", type=Path, default=None, help="Optional SPIR-V output path; defaults beside shader.")
@@ -462,6 +552,9 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         choices=["host_visible", "device_local"],
         help="Benchmark memory mode hint (informational; device_local assumes staging outside timed region).",
     )
+    p.add_argument("--cpu-only", action="store_true", help="For kernel_dense_vulkan, emit only CPU reference rows.")
+    p.add_argument("--gpu-only", action="store_true", help="For kernel_dense_vulkan, emit only Vulkan rows (still requires a visible device).")
+    p.add_argument("--log-process-cpu", action="store_true", help="Record instantaneous process %%CPU (via ps) into result meta.")
     return p.parse_args(argv)
 
 
@@ -485,6 +578,7 @@ def _parse_blocks(block_args: Optional[List[str]]) -> Optional[List[int]]:
 
 def main(argv: Optional[Sequence[str]] = None) -> None:
     args = parse_args(argv)
+    _configure_threads(args.threads)
     out = _timestamped_path(args.out, args.suite)
     if args.suite == "pq_roundtrip":
         bench_pq_roundtrip(args.sizes, args.sparsity, args.repeats, args.seed, out, args.workload)
@@ -509,6 +603,9 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             spv=args.spv,
             device_index=args.device_index,
             memory_mode=args.memory_mode,
+            cpu_only=args.cpu_only,
+            gpu_only=args.gpu_only,
+            log_process_cpu=args.log_process_cpu,
         )
     else:
         raise ValueError(f"Unknown suite: {args.suite}")

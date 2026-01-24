@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ctypes
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Sequence, Tuple
@@ -23,6 +24,10 @@ HOST_VISIBLE_COHERENT = (
 )
 
 
+def _now_ms() -> float:
+    return time.perf_counter_ns() / 1e6
+
+
 @dataclass(frozen=True)
 class VulkanDispatchConfig:
     """Device/queue selection for Vulkan carrier dispatch."""
@@ -30,6 +35,15 @@ class VulkanDispatchConfig:
     device_index: int = 0
     queue_family_index: Optional[int] = None
     memory_mode: str = "host_visible"  # "host_visible" (zero-copy) or "device_local" (staged, VRAM-resident)
+
+
+@dataclass(frozen=True)
+class DispatchTiming:
+    """Capture timing for a single submit→fence + host wall."""
+
+    submit_to_fence_ms: float
+    wall_ms: float
+    fence_waits: int = 1
 
 
 def _require_vk() -> None:
@@ -137,6 +151,12 @@ class VulkanCarrierDispatcher:
         return self.dispatch(carrier)
 
     def dispatch(self, carrier: Carrier) -> Carrier:
+        """Single-dispatch convenience wrapper (kept for adapter compatibility)."""
+        out, _ = self.dispatch_batched(carrier, dispatches=1, collect_timing=False)
+        return out
+
+    def dispatch_batched(self, carrier: Carrier, dispatches: int = 1, *, collect_timing: bool = False):
+        """Record `dispatches` dispatches into one command buffer, submit once, wait once."""
         _require_vk()
         compile_shader(self.config.shader_path, self.config.spv_path)
 
@@ -161,6 +181,8 @@ class VulkanCarrierDispatcher:
         memory_mode = getattr(self.dispatch_config, "memory_mode", "host_visible")
         if memory_mode not in ("host_visible", "device_local"):
             memory_mode = "host_visible"
+        submit_ms = None
+        wall_start = _now_ms()
         try:
             if memory_mode == "device_local":
                 # Device-local buffers for compute, host-visible staging for IO
@@ -201,7 +223,8 @@ class VulkanCarrierDispatcher:
                 self._bind_buffers(device, descriptor_set, buffers, [sign_in, support_in, sign_out, support_out])
                 command_pool, command_buffer = self._build_command_buffer(device, queue_family_index)
 
-                self._record_with_copies(
+                submit_ms = self._record_with_copies(
+                    device=device,
                     command_buffer=command_buffer,
                     pipeline=pipeline,
                     pipeline_layout=pipeline_layout,
@@ -214,6 +237,7 @@ class VulkanCarrierDispatcher:
                     device_out=buffers[2:],
                     sign_nbytes=sign_in.nbytes,
                     support_nbytes=support_in.nbytes,
+                    dispatch_count=max(1, int(dispatches)),
                 )
 
                 sign_result = _read_buffer(device, staging_memories[2], sign_out.shape, sign_out.dtype)
@@ -237,13 +261,15 @@ class VulkanCarrierDispatcher:
                 self._bind_buffers(device, descriptor_set, buffers, [sign_in, support_in, sign_out, support_out])
                 command_pool, command_buffer = self._build_command_buffer(device, queue_family_index)
 
-                self._record_and_submit(
-                    command_buffer,
-                    pipeline,
-                    pipeline_layout,
-                    descriptor_set,
-                    queue,
+                submit_ms = self._record_and_submit(
+                    device=device,
+                    command_buffer=command_buffer,
+                    pipeline=pipeline,
+                    pipeline_layout=pipeline_layout,
+                    descriptor_set=descriptor_set,
+                    queue=queue,
                     global_size=sign_in.shape[0],
+                    dispatch_count=max(1, int(dispatches)),
                 )
 
                 sign_result = _read_buffer(device, memories[2], sign_out.shape, sign_out.dtype)
@@ -251,7 +277,12 @@ class VulkanCarrierDispatcher:
 
             support = support_result.astype(bool)
             sign = np.asarray(np.sign(sign_result), dtype=np.int8)
-            return Carrier(support=support, sign=sign)
+            carrier_out = Carrier(support=support, sign=sign)
+            timing = None
+            if collect_timing and submit_ms is not None:
+                wall_ms = _now_ms() - wall_start
+                timing = DispatchTiming(submit_to_fence_ms=submit_ms, wall_ms=wall_ms, fence_waits=1)
+            return carrier_out, timing
         finally:
             # Clean up resources (reverse order of creation where relevant)
             if 'command_pool' in locals():
@@ -426,13 +457,15 @@ class VulkanCarrierDispatcher:
 
     def _record_and_submit(
         self,
+        device,
         command_buffer,
         pipeline,
         pipeline_layout,
         descriptor_set,
         queue,
         global_size: int,
-    ):
+        dispatch_count: int = 1,
+    ) -> float:
         begin_info = vk.VkCommandBufferBeginInfo(
             sType=vk.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
             flags=vk.VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
@@ -450,7 +483,8 @@ class VulkanCarrierDispatcher:
             None,
         )
         gx = (global_size + self.config.workgroup[0] - 1) // self.config.workgroup[0]
-        vk.vkCmdDispatch(command_buffer, gx, self.config.workgroup[1], self.config.workgroup[2])
+        for _ in range(dispatch_count):
+            vk.vkCmdDispatch(command_buffer, gx, self.config.workgroup[1], self.config.workgroup[2])
         vk.vkEndCommandBuffer(command_buffer)
 
         submit_info = vk.VkSubmitInfo(
@@ -458,12 +492,18 @@ class VulkanCarrierDispatcher:
             commandBufferCount=1,
             pCommandBuffers=[command_buffer],
         )
-        vk.vkQueueSubmit(queue, 1, [submit_info], vk.VK_NULL_HANDLE)
-        vk.vkQueueWaitIdle(queue)
+        fence_info = vk.VkFenceCreateInfo(sType=vk.VK_STRUCTURE_TYPE_FENCE_CREATE_INFO)
+        fence = vk.vkCreateFence(device, fence_info, None)
+        submit_start = _now_ms()
+        vk.vkQueueSubmit(queue, 1, [submit_info], fence)
+        vk.vkWaitForFences(device, 1, [fence], vk.VK_TRUE, 0xFFFFFFFFFFFFFFFF)
+        vk.vkDestroyFence(device, fence, None)
+        return _now_ms() - submit_start
 
     def _record_with_copies(
         self,
         *,
+        device,
         command_buffer,
         pipeline,
         pipeline_layout,
@@ -476,6 +516,7 @@ class VulkanCarrierDispatcher:
         device_out,
         sign_nbytes: int,
         support_nbytes: int,
+        dispatch_count: int,
     ):
         begin_info = vk.VkCommandBufferBeginInfo(
             sType=vk.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
@@ -548,7 +589,8 @@ class VulkanCarrierDispatcher:
             None,
         )
         gx = (global_size + self.config.workgroup[0] - 1) // self.config.workgroup[0]
-        vk.vkCmdDispatch(command_buffer, gx, self.config.workgroup[1], self.config.workgroup[2])
+        for _ in range(dispatch_count):
+            vk.vkCmdDispatch(command_buffer, gx, self.config.workgroup[1], self.config.workgroup[2])
 
         # Barrier to make shader writes visible to transfer
         barriers_out = [
@@ -608,8 +650,13 @@ class VulkanCarrierDispatcher:
             commandBufferCount=1,
             pCommandBuffers=[command_buffer],
         )
-        vk.vkQueueSubmit(queue, 1, [submit_info], vk.VK_NULL_HANDLE)
-        vk.vkQueueWaitIdle(queue)
+        fence_info = vk.VkFenceCreateInfo(sType=vk.VK_STRUCTURE_TYPE_FENCE_CREATE_INFO)
+        fence = vk.vkCreateFence(device, fence_info, None)
+        submit_start = _now_ms()
+        vk.vkQueueSubmit(queue, 1, [submit_info], fence)
+        vk.vkWaitForFences(device, 1, [fence], vk.VK_TRUE, 0xFFFFFFFFFFFFFFFF)
+        vk.vkDestroyFence(device, fence, None)
+        return _now_ms() - submit_start
 
 
 def build_vulkan_dispatcher(config: VulkanKernelConfig, dispatch_config: Optional[VulkanDispatchConfig] = None) -> DispatchFn:

@@ -18,3 +18,4 @@
 - [ ] Add GPU/CPU kernel partitioning tests (disjoint/halo/scheduling) to lock parallel recomposition semantics.
 - [ ] Add GPU benchmark modes for device-local vs host-visible buffers; time submit→fence (compute-only) separately from wall time; single readback/hash post-loop. Enforce exactly one fence wait inside timed region and log if violated. (device-local staging path is wired; compute-only timing + single readback/hash pending)
 - [ ] Add ALU-heavy GPU-favored workload (`alu_dense_burn`) with rounds axis and larger sizes (≥1M) to observe crossover; document memory mode and timing scope. Include rounds sweep (e.g., 1 vs 4096) to sanity-check compute scaling. (workload placeholder exists; needs shader/rounds axis)
+- [ ] Add CLI flags to `bench.py` to restrict Vulkan suite to CPU-only or GPU-only modes for quicker smoke runs.
