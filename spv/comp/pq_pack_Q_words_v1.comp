@@ -1,0 +1,47 @@
+#version 450
+layout(local_size_x = 256) in;
+
+layout(std430, set=0, binding=0) readonly buffer SUP { uint sup_u32[]; };
+layout(std430, set=0, binding=1) readonly buffer SGN { uint sgn_u32[]; };
+layout(std430, set=0, binding=2) readonly buffer QB  { uint Q_block_base[]; }; // bits, len n_blocks+1
+layout(std430, set=0, binding=3) writeonly buffer Q   { uint Q_words[]; };      // packed bits
+
+layout(push_constant) uniform PC {
+    uint n;
+    uint B_sites;
+    uint n_blocks;
+    uint n_q_words; // = ceil(total_support / 32) => allocate from Q_block_base[n_blocks]
+} pc;
+
+// popcount over sup_u32 in [start, idx) within block, wordwise over 32 sites at a time.
+// This is simple and deterministic; faster versions can use P_words directly.
+uint rank_in_block(uint start_site, uint idx) {
+    uint r = 0u;
+    // Count supported sites from start_site to idx-1
+    // (idx is within the same block)
+    for (uint i = start_site; i < idx; i++) r += (sup_u32[i] != 0u) ? 1u : 0u;
+    return r;
+}
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= pc.n) return;
+    if (sup_u32[i] == 0u) return;
+
+    uint b = i / pc.B_sites;
+    if (b >= pc.n_blocks) return;
+
+    uint start = b * pc.B_sites;
+    uint r = rank_in_block(start, i);
+    uint q_bit = Q_block_base[b] + r; // bit index in Q
+
+    uint w = q_bit >> 5;
+    uint bit = q_bit & 31u;
+
+    if (w >= pc.n_q_words) return;
+
+    uint mask = (1u << bit);
+    if (sgn_u32[i] != 0u) {
+        atomicOr(Q_words[w], mask);
+    }
+}

@@ -1,0 +1,27 @@
+#version 450
+layout(local_size_x = 256) in;
+
+layout(std430, set=0, binding=0) readonly buffer X { float x[]; };
+layout(std430, set=0, binding=1) writeonly buffer SUP { uint sup_u32[]; };  // 0/1 per site
+layout(std430, set=0, binding=2) writeonly buffer SGN { uint sgn_u32[]; };  // 0/1 per site (1 => +1), only valid if sup=1
+
+layout(push_constant) uniform PC {
+    uint n;
+    float eps;   // support if abs(x) > eps
+    uint sign_one_is_positive; // 1 => signbit 1 means +1 (recommended), else invert
+} pc;
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= pc.n) return;
+
+    float v = x[i];
+    uint sup = (abs(v) > pc.eps) ? 1u : 0u;
+
+    // default convention: sgnbit=1 => +1, 0 => -1
+    uint pos = (v >= 0.0) ? 1u : 0u;
+    uint sgn = (pc.sign_one_is_positive == 1u) ? pos : (1u - pos);
+
+    sup_u32[i] = sup;
+    sgn_u32[i] = sgn;
+}

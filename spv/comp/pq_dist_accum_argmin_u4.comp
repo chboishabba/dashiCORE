@@ -1,0 +1,80 @@
+#version 450
+layout(local_size_x = 256) in;
+
+/*
+PQ_DIST_ACCUM_ARGMIN_U4:
+- Reads PQ codes directly from packed u4 stream
+- Computes dist[i] = sum_m LUT[m, code(i,m)]
+- Emits per-workgroup argmin partials
+
+Packed layout:
+  codes packed linearly: codes[i*M + m]
+  packed_u32[word] holds 8 codes
+*/
+
+layout(std430, set=0, binding=0) readonly buffer LUT   { float lut[]; };       // M*Ks
+layout(std430, set=0, binding=1) readonly buffer P     { uint packed_u32[]; }; // packed u4 codes
+layout(std430, set=0, binding=2) writeonly buffer DIST { float dist[]; };      // Nvec
+layout(std430, set=0, binding=3) writeonly buffer PART { uvec2 partials[]; };  // (best_idx, dist_bits)
+
+layout(push_constant) uniform PC {
+  uint Nvec;   // number of database vectors
+  uint M;      // subspaces
+  uint Ks;     // centroids per subspace (<=16)
+} pc;
+
+shared float sh_val[256];
+shared uint  sh_idx[256];
+
+uint read_u4_code(uint code_index) {
+  uint w = code_index >> 3;        // /8
+  uint k = code_index & 7u;        // %8
+  uint v = packed_u32[w];
+  return (v >> (4u * k)) & 15u;
+}
+
+void main() {
+  uint i = gl_GlobalInvocationID.x;
+  uint lid = gl_LocalInvocationID.x;
+
+  float dacc = 3.402823e38; // +FLT_MAX
+  uint idx = i;
+
+  if (i < pc.Nvec) {
+    float s = 0.0;
+    uint base = i * pc.M;
+    for (uint m = 0u; m < pc.M; m++) {
+      uint code = read_u4_code(base + m); // 0..15
+      // assume code < Ks
+      s += lut[m * pc.Ks + code];
+    }
+    dacc = s;
+    dist[i] = s;
+  }
+
+  sh_val[lid] = dacc;
+  sh_idx[lid] = idx;
+  barrier();
+
+  // deterministic argmin reduction (tie-break by index)
+  for (uint stride = 128u; stride > 0u; stride >>= 1u) {
+    if (lid < stride) {
+      float v0 = sh_val[lid];
+      float v1 = sh_val[lid + stride];
+      uint  i0 = sh_idx[lid];
+      uint  i1 = sh_idx[lid + stride];
+
+      bool take1 = (v1 < v0) || (v1 == v0 && i1 < i0);
+      if (take1) {
+        sh_val[lid] = v1;
+        sh_idx[lid] = i1;
+      }
+    }
+    barrier();
+  }
+
+  if (lid == 0u) {
+    partials[gl_WorkGroupID.x] =
+      uvec2(sh_idx[0], floatBitsToUint(sh_val[0]));
+  }
+}

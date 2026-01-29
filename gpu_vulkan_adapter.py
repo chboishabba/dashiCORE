@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional, Tuple
@@ -17,6 +19,9 @@ class VulkanKernelConfig:
     workgroup: Tuple[int, int, int] = (1, 1, 1)
     compile_on_init: bool = False
     compile_on_dispatch: bool = False
+    # Binding order for descriptor set 0, bindings 0..3.
+    # Names must be drawn from {"support_in", "sign_in", "support_out", "sign_out"}.
+    binding_order: Tuple[str, str, str, str] = ("support_in", "sign_in", "support_out", "sign_out")
 
 
 # GPU dispatch signature used by the adapter.
@@ -67,12 +72,22 @@ class VulkanBackendAdapter(Backend):
         """
         self._ensure_compiled()
 
+        debug = bool(os.getenv("DASHI_VULKAN_DEBUG"))
+        perf = bool(os.getenv("DASHI_VULKAN_TIMING"))
+        t0 = time.perf_counter() if perf else None
+
         if self.dispatcher is None:
             if not self.allow_fallback:
                 raise RuntimeError("Vulkan dispatcher missing and fallback disabled")
+            if debug:
+                print("[vk][adapter] dispatcher missing, falling back to CPU (carrier passthrough)")
             post = carrier
         else:
             post = self.dispatcher(carrier)
+
+        if perf and t0 is not None:
+            dt = (time.perf_counter() - t0) * 1e3
+            print(f"[vk][adapter] dispatch wall={dt:.3f} ms (dispatcher={'present' if self.dispatcher else 'none'})")
 
         validate_kernel_output(carrier, post)
         return post

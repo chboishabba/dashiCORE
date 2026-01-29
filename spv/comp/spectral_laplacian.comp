@@ -1,0 +1,27 @@
+#version 450
+layout(local_size_x = 256) in;
+
+layout(std430, set=0, binding=0) readonly buffer InHat {
+    vec2 data[];
+} in_hat;
+
+layout(std430, set=0, binding=1) writeonly buffer OutHat {
+    vec2 data[];
+} out_hat;
+
+layout(std430, set=0, binding=2) readonly buffer K2Buf {
+    float data[];
+} k2_buf;
+
+layout(push_constant) uniform PC {
+    uint n;
+} pc;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= pc.n) {
+        return;
+    }
+    float k2 = k2_buf.data[idx];
+    out_hat.data[idx] = -k2 * in_hat.data[idx];
+}

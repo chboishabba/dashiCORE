@@ -1,0 +1,32 @@
+#version 450
+layout(local_size_x = 256) in;
+
+/*
+BITPACK_U4:
+Pack 8 nibbles (4-bit codes) into one uint32 word.
+packed[w] holds codes[w*8 + 0 .. w*8+7] in little-nibble order.
+*/
+
+layout(std430, set=0, binding=0) readonly buffer C { uint codes_u8[]; }; // values 0..15
+layout(std430, set=0, binding=1) writeonly buffer P { uint packed_u32[]; };
+
+layout(push_constant) uniform PC {
+  uint n_codes;
+  uint n_words; // ceil(n_codes/8)
+} pc;
+
+void main() {
+  uint w = gl_GlobalInvocationID.x;
+  if (w >= pc.n_words) return;
+
+  uint base = w * 8u;
+  uint outv = 0u;
+
+  for (uint k = 0u; k < 8u; k++) {
+    uint i = base + k;
+    uint c = (i < pc.n_codes) ? (codes_u8[i] & 15u) : 0u;
+    outv |= (c << (4u * k));
+  }
+
+  packed_u32[w] = outv;
+}

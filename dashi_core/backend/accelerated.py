@@ -23,3 +23,7 @@ class AcceleratedBackend(Backend):
             allows_mixed_precision=False,
         )
         super().__init__(capabilities=accel_caps, precision=precision)
+
+    # Skip per-op bookkeeping to reduce overhead in tight loops.
+    def _record(self, _: str) -> None:
+        return

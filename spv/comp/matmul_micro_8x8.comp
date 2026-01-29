@@ -1,0 +1,50 @@
+#version 450
+layout(local_size_x = 8, local_size_y = 8) in;
+
+/*
+MATMUL_MICRO_8x8:
+C = A * B
+Row-major A, B, C
+M,N,K must be multiples of 8 for full coverage; partials can be added later.
+*/
+
+layout(std430, set=0, binding=0) readonly buffer A_ { float A[]; }; // M*K
+layout(std430, set=0, binding=1) readonly buffer B_ { float B[]; }; // K*N
+layout(std430, set=0, binding=2) writeonly buffer C_ { float C[]; }; // M*N
+
+layout(push_constant) uniform PC {
+  uint M;
+  uint N;
+  uint K;
+} pc;
+
+shared float As[8][8];
+shared float Bs[8][8];
+
+void main() {
+  uint global_row = gl_WorkGroupID.y * 8u + gl_LocalInvocationID.y;
+  uint global_col = gl_WorkGroupID.x * 8u + gl_LocalInvocationID.x;
+
+  float acc = 0.0;
+
+  for (uint kb = 0u; kb < pc.K; kb += 8u) {
+    // load A tile
+    As[gl_LocalInvocationID.y][gl_LocalInvocationID.x] =
+      A[global_row * pc.K + (kb + gl_LocalInvocationID.x)];
+
+    // load B tile
+    Bs[gl_LocalInvocationID.y][gl_LocalInvocationID.x] =
+      B[(kb + gl_LocalInvocationID.y) * pc.N + global_col];
+
+    barrier();
+
+    // compute
+    for (uint k = 0u; k < 8u; k++) {
+      acc += As[gl_LocalInvocationID.y][k] * Bs[k][gl_LocalInvocationID.x];
+    }
+
+    barrier();
+  }
+
+  C[global_row * pc.N + global_col] = acc;
+}

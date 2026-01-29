@@ -1,0 +1,59 @@
+#version 450
+layout(local_size_x = 256) in;
+
+layout(std430, set=0, binding=0) readonly buffer X { float x[]; };
+layout(std430, set=0, binding=1) writeonly buffer H { uvec2 partial_hash[]; }; // each is 64-bit split: (lo, hi)
+
+layout(push_constant) uniform PC { uint n; } pc;
+
+shared uvec2 sh[256];
+
+uvec2 fnv1a64_update(uvec2 h, uint data) {
+    // 64-bit FNV-1a: h ^= data; h *= FNV_prime
+    // Represent 64-bit as uvec2 (lo, hi).
+    // This is a minimal implementation; good enough for parity checks.
+    const uint FNV_PRIME_LO = 0x000001B3u;
+    const uint FNV_PRIME_HI = 0x00000001u;
+    // XOR into low
+    h.x ^= data;
+
+    // 64-bit multiply h *= prime (schoolbook)
+    uint a0 = h.x, a1 = h.y;
+    uint b0 = FNV_PRIME_LO, b1 = FNV_PRIME_HI;
+
+    uint lo = a0 * b0;
+    uint mid1 = a0 * b1;
+    uint mid2 = a1 * b0;
+    uint hi = a1 * b1;
+
+    // carry into hi from lo’s upper 32 bits is implicit in uint overflow; approximate:
+    uint hi_acc = hi + mid1 + mid2;
+    return uvec2(lo, hi_acc);
+}
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    uint lid = gl_LocalInvocationID.x;
+
+    // FNV offset basis 14695981039346656037
+    uvec2 h = uvec2(0x84222325u, 0xCBF29CE4u);
+
+    if (gid < pc.n) {
+        uint bits = floatBitsToUint(x[gid]);
+        h = fnv1a64_update(h, bits);
+    }
+    sh[lid] = h;
+    barrier();
+
+    // fold deterministically (xor) within group
+    for (uint stride = 128; stride > 0; stride >>= 1) {
+        if (lid < stride) {
+            sh[lid] ^= sh[lid + stride];
+        }
+        barrier();
+    }
+
+    if (lid == 0) {
+        partial_hash[gl_WorkGroupID.x] = sh[0];
+    }
+}

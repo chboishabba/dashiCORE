@@ -1,0 +1,19 @@
+#version 450
+layout(local_size_x = 1) in;
+
+layout(std430, set=0, binding=0) readonly buffer BC { uint block_count[]; };
+layout(std430, set=0, binding=1) writeonly buffer QB { uint Q_block_base[]; }; // length n_blocks+1
+
+layout(push_constant) uniform PC {
+    uint n_blocks;
+} pc;
+
+void main() {
+    // exclusive prefix in bits
+    uint sum = 0u;
+    Q_block_base[0] = 0u;
+    for (uint b = 0u; b < pc.n_blocks; b++) {
+        sum += block_count[b];
+        Q_block_base[b + 1u] = sum; // in bits
+    }
+}

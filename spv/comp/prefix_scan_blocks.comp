@@ -1,0 +1,40 @@
+#version 450
+layout(local_size_x = 256) in;
+
+/*
+PREFIX_SCAN_BLOCKS (inclusive):
+out[i] = sum_{j=0..i} in[j] within each 256-sized block.
+Deterministic. For full-array scan, scan block sums then add offsets.
+*/
+
+layout(std430, set=0, binding=0) readonly buffer IN  { uint in_u32[]; };
+layout(std430, set=0, binding=1) writeonly buffer OUT { uint out_u32[]; };
+layout(std430, set=0, binding=2) writeonly buffer BSUM { uint block_sums[]; }; // one per block
+
+layout(push_constant) uniform PC { uint n; } pc;
+
+shared uint sh[256];
+
+void main() {
+  uint gid = gl_GlobalInvocationID.x;
+  uint lid = gl_LocalInvocationID.x;
+  uint block = gl_WorkGroupID.x;
+
+  uint v = (gid < pc.n) ? in_u32[gid] : 0u;
+  sh[lid] = v;
+  barrier();
+
+  // Hillis–Steele inclusive scan (deterministic)
+  for (uint offset = 1u; offset < 256u; offset <<= 1u) {
+    uint tmp = 0u;
+    if (lid >= offset) tmp = sh[lid - offset];
+    barrier();
+    sh[lid] += tmp;
+    barrier();
+  }
+
+  if (gid < pc.n) out_u32[gid] = sh[lid];
+
+  // last lane writes block sum
+  if (lid == 255u) block_sums[block] = sh[lid];
+}

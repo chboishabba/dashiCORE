@@ -1,0 +1,30 @@
+#version 450
+layout(local_size_x = 256) in;
+
+/*
+CODES_UNPACK_FROM_U4:
+Unpack packed_u32 words into codes_u32[] (values 0..15).
+Inverse of bitpack_u4.
+*/
+
+layout(std430, set=0, binding=0) readonly buffer P { uint packed_u32[]; };
+layout(std430, set=0, binding=1) writeonly buffer C { uint codes_u32[]; };
+
+layout(push_constant) uniform PC {
+  uint n_codes;  // total number of codes = Nvec * M
+  uint n_words;  // ceil(n_codes / 8)
+} pc;
+
+void main() {
+  uint w = gl_GlobalInvocationID.x;
+  if (w >= pc.n_words) return;
+
+  uint v = packed_u32[w];
+  uint base = w * 8u;
+
+  for (uint k = 0u; k < 8u; k++) {
+    uint i = base + k;
+    if (i >= pc.n_codes) return;
+    codes_u32[i] = (v >> (4u * k)) & 15u;
+  }
+}

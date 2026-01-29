@@ -1,0 +1,25 @@
+#version 450
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(std430, set=0, binding=0) readonly buffer AdvBuf { float data[]; } adv_buf;
+layout(std430, set=0, binding=1) readonly buffer LapBuf { float data[]; } lap_buf;
+layout(std430, set=0, binding=2) readonly buffer NuBuf { float data[]; } nu_buf;
+layout(std430, set=0, binding=3) writeonly buffer RhsBuf { float data[]; } rhs_buf;
+
+layout(push_constant) uniform PC {
+    uint N;
+    float nu0;
+} pc;
+
+void main() {
+    uint x = gl_GlobalInvocationID.x;
+    uint y = gl_GlobalInvocationID.y;
+    if (x >= pc.N || y >= pc.N) {
+        return;
+    }
+    uint idx = y * pc.N + x;
+    float adv = adv_buf.data[idx];
+    float lap = lap_buf.data[idx];
+    float nu = pc.nu0 + nu_buf.data[idx];
+    rhs_buf.data[idx] = -adv + nu * lap;
+}

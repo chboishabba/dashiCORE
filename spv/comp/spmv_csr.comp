@@ -1,0 +1,32 @@
+#version 450
+layout(local_size_x = 256) in;
+
+/*
+SPMV_CSR:
+y[r] = sum_k val[k] * x[col[k]], k in [row_ptr[r], row_ptr[r+1])
+Deterministic accumulation order per row.
+*/
+
+layout(std430, set=0, binding=0) readonly buffer ROW { uint row_ptr[]; };   // length (n_rows+1)
+layout(std430, set=0, binding=1) readonly buffer COL { uint col_idx[]; };   // length nnz
+layout(std430, set=0, binding=2) readonly buffer VAL { float val[]; };      // length nnz
+layout(std430, set=0, binding=3) readonly buffer X   { float x[]; };        // length n_cols
+layout(std430, set=0, binding=4) writeonly buffer Y  { float y[]; };        // length n_rows
+
+layout(push_constant) uniform PC {
+  uint n_rows;
+} pc;
+
+void main() {
+  uint r = gl_GlobalInvocationID.x;
+  if (r >= pc.n_rows) return;
+
+  uint s = row_ptr[r];
+  uint e = row_ptr[r + 1u];
+
+  float acc = 0.0;
+  for (uint k = s; k < e; k++) {
+    acc += val[k] * x[col_idx[k]];
+  }
+  y[r] = acc;
+}

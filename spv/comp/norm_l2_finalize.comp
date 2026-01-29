@@ -1,0 +1,14 @@
+#version 450
+layout(local_size_x = 1) in;
+
+/*
+NORM_L2_FINALIZE:
+out[0] = sqrt(sum_sq[0])
+*/
+
+layout(std430, set=0, binding=0) readonly buffer S { float sum_sq[]; }; // length 1
+layout(std430, set=0, binding=1) writeonly buffer O { float outv[]; };  // length 1
+
+void main() {
+  outv[0] = sqrt(sum_sq[0]);
+}

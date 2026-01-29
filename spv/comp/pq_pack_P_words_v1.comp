@@ -1,0 +1,25 @@
+#version 450
+layout(local_size_x = 256) in;
+
+layout(std430, set=0, binding=0) readonly buffer SUP { uint sup_u32[]; };
+layout(std430, set=0, binding=1) writeonly buffer P { uint P_words[]; };
+
+layout(push_constant) uniform PC {
+    uint n;            // sites
+    uint n_p_words;    // = ceil(n/32)
+} pc;
+
+void main() {
+    uint w = gl_GlobalInvocationID.x;
+    if (w >= pc.n_p_words) return;
+
+    uint base = w * 32u;
+    uint bits = 0u;
+    for (uint k = 0u; k < 32u; k++) {
+        uint i = base + k;
+        if (i < pc.n) {
+            if (sup_u32[i] != 0u) bits |= (1u << k);
+        }
+    }
+    P_words[w] = bits;
+}

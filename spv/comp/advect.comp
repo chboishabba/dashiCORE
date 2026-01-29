@@ -1,0 +1,22 @@
+#version 450
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(std430, set=0, binding=0) readonly buffer UxBuf { float data[]; } ux_buf;
+layout(std430, set=0, binding=1) readonly buffer UyBuf { float data[]; } uy_buf;
+layout(std430, set=0, binding=2) readonly buffer DxBuf { float data[]; } dwdx_buf;
+layout(std430, set=0, binding=3) readonly buffer DyBuf { float data[]; } dwdy_buf;
+layout(std430, set=0, binding=4) writeonly buffer OutBuf { float data[]; } adv_buf;
+
+layout(push_constant) uniform PC { uint N; } pc;
+
+void main() {
+    uint x = gl_GlobalInvocationID.x;
+    uint y = gl_GlobalInvocationID.y;
+    if (x >= pc.N || y >= pc.N) {
+        return;
+    }
+    uint idx = y * pc.N + x;
+    float ux = ux_buf.data[idx];
+    float uy = uy_buf.data[idx];
+    adv_buf.data[idx] = ux * dwdx_buf.data[idx] + uy * dwdy_buf.data[idx];
+}

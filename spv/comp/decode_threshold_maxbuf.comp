@@ -1,0 +1,46 @@
+#version 450
+
+// Compute ternary sign from normalized residual (omega_lp - base), using max value from buffer.
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer OmegaBuf {
+    float data[];
+} omega_buf;
+
+layout(std430, set = 0, binding = 1) readonly buffer BaseBuf {
+    float data[];
+} base_buf;
+
+layout(std430, set = 0, binding = 2) buffer SignOut {
+    int data[];
+} sign_out;
+
+layout(std430, set = 0, binding = 3) readonly buffer MaxBuf {
+    float data[];
+} max_buf;
+
+layout(push_constant) uniform PushConsts {
+    uint total;
+    float tau;
+    float eps;
+} pc;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= pc.total) {
+        return;
+    }
+    float diff = omega_buf.data[idx] - base_buf.data[idx];
+    float max_val = max(max_buf.data[0], pc.eps);
+    float norm = diff / max_val;
+    norm = clamp(norm, -1.0, 1.0);
+
+    int s = 0;
+    if (norm >= pc.tau) {
+        s = 1;
+    } else if (norm <= -pc.tau) {
+        s = -1;
+    }
+    sign_out.data[idx] = s;
+}

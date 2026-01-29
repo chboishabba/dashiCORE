@@ -26,7 +26,7 @@ if str(ROOT) not in sys.path:
 
 from dashi_core.backend import use_backend
 from dashi_core.carrier import Carrier
-from gpu_common_methods import compile_shader
+from gpu_common_methods import compile_shader, resolve_shader, resolve_spv
 from gpu_vulkan_backend import make_vulkan_kernel, register_vulkan_backend, VulkanKernelConfig
 from gpu_vulkan_dispatcher import VulkanDispatchConfig
 
@@ -36,13 +36,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--shader",
         type=Path,
-        default=ROOT / "gpu_shaders" / "carrier_passthrough.comp",
+        default=resolve_shader("carrier_passthrough"),
         help="Path to GLSL compute shader",
     )
     parser.add_argument(
         "--spv",
         type=Path,
-        default=ROOT / "gpu_shaders" / "carrier_passthrough.spv",
+        default=None,
         help="Path to SPIR-V output",
     )
     parser.add_argument(
@@ -61,6 +61,8 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    if args.spv is None:
+        args.spv = resolve_spv(Path(args.shader).stem)
 
     if not args.cpu_dispatcher:
         compile_shader(args.shader, args.spv)

@@ -1,0 +1,47 @@
+#version 450
+// params: SB_sites (e.g. 4096), C_sites (e.g. 512 or 1024), n_chunks_per_sb = SB_sites / C_sites (must divide exactly), layout(local_size_x = 256) in;
+
+layout(std430, set=0, binding=0) readonly buffer P  { uint P_words[]; };
+layout(std430, set=0, binding=1) writeonly buffer SBC { uint SB_count[]; };       // [n_sb]
+layout(std430, set=0, binding=2) writeonly buffer CC  { uint chunk_count[]; };    // [n_sb * n_chunks]
+
+layout(push_constant) uniform PC {
+    uint n;              // sites
+    uint n_p_words;      // ceil(n/32)
+    uint SB_sites;       // 4096
+    uint C_sites;        // 512/1024
+    uint n_sb;           // ceil(n/SB_sites)
+    uint n_chunks;       // SB_sites / C_sites
+} pc;
+
+uint popcount_range_words(uint w0, uint w1) {
+    uint acc = 0u;
+    for (uint w = w0; w < w1; w++) {
+        if (w < pc.n_p_words) acc += uint(bitCount(P_words[w]));
+    }
+    return acc;
+}
+
+void main() {
+    uint sb = gl_GlobalInvocationID.x;
+    if (sb >= pc.n_sb) return;
+
+    uint sb_start = sb * pc.SB_sites;
+    uint sb_end   = min(pc.n, sb_start + pc.SB_sites);
+
+    // Superblock count
+    uint w0 = sb_start >> 5;
+    uint w1 = (sb_end + 31u) >> 5;
+    uint sb_acc = popcount_range_words(w0, w1);
+    SB_count[sb] = sb_acc;
+
+    // Chunk counts inside SB
+    for (uint c = 0u; c < pc.n_chunks; c++) {
+        uint ch_start = sb_start + c * pc.C_sites;
+        uint ch_end   = min(pc.n, ch_start + pc.C_sites);
+        uint cw0 = ch_start >> 5;
+        uint cw1 = (ch_end + 31u) >> 5;
+        uint c_acc = popcount_range_words(cw0, cw1);
+        chunk_count[sb * pc.n_chunks + c] = c_acc;
+    }
+}

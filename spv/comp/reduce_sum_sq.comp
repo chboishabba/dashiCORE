@@ -1,0 +1,35 @@
+#version 450
+layout(local_size_x = 256) in;
+
+/*
+REDUCE_SUM_SQ (pass):
+partials[group] = sum x[i]^2 over group range
+Deterministic within-group reduction.
+*/
+
+layout(std430, set=0, binding=0) readonly buffer X { float x[]; };
+layout(std430, set=0, binding=1) writeonly buffer P { float partials[]; };
+
+layout(push_constant) uniform PC { uint n; } pc;
+
+shared float sh[256];
+
+void main() {
+  uint lid = gl_LocalInvocationID.x;
+  uint gid = gl_GlobalInvocationID.x;
+
+  float v = 0.0;
+  if (gid < pc.n) {
+    float xi = x[gid];
+    v = xi * xi;
+  }
+  sh[lid] = v;
+  barrier();
+
+  for (uint stride = 128; stride > 0; stride >>= 1) {
+    if (lid < stride) sh[lid] += sh[lid + stride];
+    barrier();
+  }
+
+  if (lid == 0) partials[gl_WorkGroupID.x] = sh[0];
+}

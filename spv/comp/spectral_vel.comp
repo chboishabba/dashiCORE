@@ -1,0 +1,44 @@
+#version 450
+layout(local_size_x = 256) in;
+
+layout(std430, set=0, binding=0) readonly buffer PsiHat {
+    vec2 data[];
+} psi_hat;
+
+layout(std430, set=0, binding=1) writeonly buffer UxHat {
+    vec2 data[];
+} ux_hat;
+
+layout(std430, set=0, binding=2) writeonly buffer UyHat {
+    vec2 data[];
+} uy_hat;
+
+layout(std430, set=0, binding=3) readonly buffer KxBuf {
+    float data[];
+} kx_buf;
+
+layout(std430, set=0, binding=4) readonly buffer KyBuf {
+    float data[];
+} ky_buf;
+
+layout(push_constant) uniform PC {
+    uint n;
+} pc;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= pc.n) {
+        return;
+    }
+    vec2 psi = psi_hat.data[idx];
+    float kx = kx_buf.data[idx];
+    float ky = ky_buf.data[idx];
+
+    // ux_hat = i * ky * psi
+    vec2 i_psi = vec2(-psi.y, psi.x);
+    ux_hat.data[idx] = i_psi * ky;
+
+    // uy_hat = -i * kx * psi
+    vec2 minus_i_psi = vec2(psi.y, -psi.x);
+    uy_hat.data[idx] = minus_i_psi * kx;
+}

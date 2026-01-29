@@ -9,7 +9,7 @@ from typing import Optional, Sequence, Tuple
 import numpy as np
 
 from dashi_core.carrier import Carrier
-from gpu_common_methods import compile_shader, find_memory_type
+from gpu_common_methods import compile_shader, find_memory_type, resolve_shader, resolve_spv
 from gpu_vulkan_adapter import DispatchFn, VulkanKernelConfig
 
 try:
@@ -242,7 +242,25 @@ class VulkanCarrierDispatcher:
 
     def dispatch(self, carrier: Carrier) -> Carrier:
         """Single-dispatch convenience wrapper (kept for adapter compatibility)."""
-        out, _, _ = self.dispatch_batched(carrier, dispatches=1, collect_timing=False)
+        import os
+
+        dispatches = int(os.getenv("DASHI_VULKAN_DISPATCHES", "1"))
+        collect = bool(os.getenv("DASHI_VULKAN_TIMING"))
+        debug = bool(os.getenv("DASHI_VULKAN_DEBUG"))
+
+        out, timing, _ = self.dispatch_batched(
+            carrier,
+            dispatches=dispatches,
+            collect_timing=collect,
+            hash_only=False,
+            handles=self.shared_handles,
+        )
+        if collect and timing is not None:
+            print(
+                f"[vk][dispatch] submit→fence={timing.submit_to_fence_ms:.3f} ms, wall={timing.wall_ms:.3f} ms, fence_waits={timing.fence_waits}, dispatches={dispatches}"
+            )
+        elif debug:
+            print(f"[vk][dispatch] dispatches={dispatches} (timing disabled)")
         return out
 
     def dispatch_batched(
@@ -274,14 +292,15 @@ class VulkanCarrierDispatcher:
         physical_device = active_handles.physical_device
         queue_family_index = active_handles.queue_family_index
 
-        sign_in, support_in = self._prepare_inputs(carrier)
+        sign_in, support_in, n, k = self._prepare_inputs(carrier)
         sign_out = np.empty_like(sign_in)
         support_out = np.empty_like(support_in)
 
-        buffers = []
-        memories = []
-        staging_buffers = []
-        staging_memories = []
+        # Buffers and memories are tracked per role to avoid binding-order mixups.
+        buffers = {}
+        memories = {}
+        staging_buffers = {}
+        staging_memories = {}
         hash_buffer = None
         hash_memory = None
         hash_staging_buffer = None
@@ -297,18 +316,23 @@ class VulkanCarrierDispatcher:
                 usage_storage = vk.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
                 usage_copy_src = vk.VK_BUFFER_USAGE_TRANSFER_SRC_BIT
                 usage_copy_dst = vk.VK_BUFFER_USAGE_TRANSFER_DST_BIT
-                hash_shader_path = self.config.shader_path.parent / "hash_reduce.comp"
-                hash_spv_path = hash_shader_path.with_suffix(".spv")
+                hash_shader_path = resolve_shader("hash_reduce")
+                hash_spv_path = resolve_spv(hash_shader_path.stem)
                 if hash_only:
                     compile_shader(hash_shader_path, hash_spv_path)
 
                 # Staging inputs (host visible, copy src)
-                for arr in (sign_in, support_in):
+                for name, arr in (("support_in", support_in), ("sign_in", sign_in)):
                     buf, mem = _create_buffer(device, mem_props, arr.nbytes, usage_copy_src, HOST_VISIBLE_COHERENT)
-                    staging_buffers.append(buf)
-                    staging_memories.append(mem)
+                    staging_buffers[name] = buf
+                    staging_memories[name] = mem
                 # Device buffers (storage + copy src/dst)
-                for arr in (sign_in, support_in, sign_out, support_out):
+                for name, arr in (
+                    ("support_in", support_in),
+                    ("sign_in", sign_in),
+                    ("support_out", support_out),
+                    ("sign_out", sign_out),
+                ):
                     buf, mem = _create_buffer(
                         device,
                         mem_props,
@@ -316,8 +340,8 @@ class VulkanCarrierDispatcher:
                         usage_storage | usage_copy_src | usage_copy_dst,
                         vk.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
                     )
-                    buffers.append(buf)
-                    memories.append(mem)
+                    buffers[name] = buf
+                    memories[name] = mem
                 # Device-local hash buffer (4 bytes) plus staging hash buffer
                 hash_buffer, hash_memory = _create_buffer(
                     device,
@@ -334,20 +358,25 @@ class VulkanCarrierDispatcher:
                     HOST_VISIBLE_COHERENT,
                 )
                 # Staging outputs (host visible, copy dst)
-                for arr in (sign_out, support_out):
+                for name, arr in (("support_out", support_out), ("sign_out", sign_out)):
                     buf, mem = _create_buffer(device, mem_props, arr.nbytes, usage_copy_dst, HOST_VISIBLE_COHERENT)
-                    staging_buffers.append(buf)
-                    staging_memories.append(mem)
+                    staging_buffers[name] = buf
+                    staging_memories[name] = mem
 
                 # Upload inputs to staging
-                _write_buffer(device, staging_memories[0], sign_in)
-                _write_buffer(device, staging_memories[1], support_in)
+                _write_buffer(device, staging_memories["support_in"], support_in)
+                _write_buffer(device, staging_memories["sign_in"], sign_in)
 
                 descriptor_set_layout, pipeline_layout = self._build_layouts(device)
                 shader_module = self._create_shader_module(device, self.config.spv_path)
                 pipeline = self._create_pipeline(device, pipeline_layout, shader_module)
                 descriptor_pool, descriptor_set = self._allocate_descriptors(device, descriptor_set_layout)
-                self._bind_buffers(device, descriptor_set, buffers, [sign_in, support_in, sign_out, support_out])
+                self._bind_buffers(
+                    device,
+                    descriptor_set,
+                    buffers,
+                    {"support_in": support_in, "sign_in": sign_in, "support_out": support_out, "sign_out": sign_out},
+                )
                 command_pool, command_buffer = self._build_command_buffer(device, queue_family_index)
 
                 hash_handles: dict = {}
@@ -358,11 +387,15 @@ class VulkanCarrierDispatcher:
                     pipeline_layout=pipeline_layout,
                     descriptor_set=descriptor_set,
                     queue=queue,
-                    global_size=sign_in.shape[0],
-                    staging_in=staging_buffers[:2],
-                    device_in=buffers[:2],
-                    staging_out=staging_buffers[2:],
-                    device_out=buffers[2:],
+                    global_size=n,
+                    staging_support_in=staging_buffers["support_in"],
+                    staging_sign_in=staging_buffers["sign_in"],
+                    device_support_in=buffers["support_in"],
+                    device_sign_in=buffers["sign_in"],
+                    staging_support_out=staging_buffers["support_out"],
+                    staging_sign_out=staging_buffers["sign_out"],
+                    device_support_out=buffers["support_out"],
+                    device_sign_out=buffers["sign_out"],
                     sign_nbytes=sign_in.nbytes,
                     support_nbytes=support_in.nbytes,
                     dispatch_count=max(1, int(dispatches)),
@@ -372,11 +405,12 @@ class VulkanCarrierDispatcher:
                     hash_push_constant=sign_in.shape[0],
                     hash_spv_path=hash_spv_path if hash_only else None,
                     hash_handles=hash_handles,
+                    push_consts=(n, k),
                 )
 
                 if not hash_only:
-                    sign_result = _read_buffer(device, staging_memories[2], sign_out.shape, sign_out.dtype)
-                    support_result = _read_buffer(device, staging_memories[3], support_out.shape, support_out.dtype)
+                    sign_result = _read_buffer(device, staging_memories["sign_out"], sign_out.shape, sign_out.dtype)
+                    support_result = _read_buffer(device, staging_memories["support_out"], support_out.shape, support_out.dtype)
                 else:
                     sign_result = None
                     support_result = None
@@ -397,19 +431,29 @@ class VulkanCarrierDispatcher:
                 host_flags = HOST_VISIBLE_COHERENT
                 buffer_usage = vk.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
 
-                for arr in (sign_in, support_in, sign_out, support_out):
+                for name, arr in (
+                    ("support_in", support_in),
+                    ("sign_in", sign_in),
+                    ("support_out", support_out),
+                    ("sign_out", sign_out),
+                ):
                     buffer, memory = _create_buffer(device, mem_props, arr.nbytes, buffer_usage, host_flags)
-                    buffers.append(buffer)
-                    memories.append(memory)
+                    buffers[name] = buffer
+                    memories[name] = memory
 
-                _write_buffer(device, memories[0], sign_in)
-                _write_buffer(device, memories[1], support_in)
+                _write_buffer(device, memories["support_in"], support_in)
+                _write_buffer(device, memories["sign_in"], sign_in)
 
                 descriptor_set_layout, pipeline_layout = self._build_layouts(device)
                 shader_module = self._create_shader_module(device, self.config.spv_path)
                 pipeline = self._create_pipeline(device, pipeline_layout, shader_module)
                 descriptor_pool, descriptor_set = self._allocate_descriptors(device, descriptor_set_layout)
-                self._bind_buffers(device, descriptor_set, buffers, [sign_in, support_in, sign_out, support_out])
+                self._bind_buffers(
+                    device,
+                    descriptor_set,
+                    buffers,
+                    {"support_in": support_in, "sign_in": sign_in, "support_out": support_out, "sign_out": sign_out},
+                )
                 command_pool, command_buffer = self._build_command_buffer(device, queue_family_index)
 
                 submit_ms = self._record_and_submit(
@@ -419,12 +463,13 @@ class VulkanCarrierDispatcher:
                     pipeline_layout=pipeline_layout,
                     descriptor_set=descriptor_set,
                     queue=queue,
-                    global_size=sign_in.shape[0],
+                    global_size=n,
                     dispatch_count=max(1, int(dispatches)),
+                    push_consts=(n, k),
                 )
 
-                sign_result = _read_buffer(device, memories[2], sign_out.shape, sign_out.dtype)
-                support_result = _read_buffer(device, memories[3], support_out.shape, support_out.dtype)
+                sign_result = _read_buffer(device, memories["sign_out"], sign_out.shape, sign_out.dtype)
+                support_result = _read_buffer(device, memories["support_out"], support_out.shape, support_out.dtype)
                 hash_value = None
 
             carrier_out = None
@@ -451,11 +496,13 @@ class VulkanCarrierDispatcher:
                 vk.vkDestroyDescriptorSetLayout(device, descriptor_set_layout, None)
             if 'shader_module' in locals():
                 vk.vkDestroyShaderModule(device, shader_module, None)
-            for buf, mem in zip(staging_buffers[::-1], staging_memories[::-1]):
+            for buf in staging_buffers.values():
                 vk.vkDestroyBuffer(device, buf, None)
+            for mem in staging_memories.values():
                 vk.vkFreeMemory(device, mem, None)
-            for buf, mem in zip(buffers[::-1], memories[::-1]):
+            for buf in buffers.values():
                 vk.vkDestroyBuffer(device, buf, None)
+            for mem in memories.values():
                 vk.vkFreeMemory(device, mem, None)
             if hash_buffer is not None:
                 vk.vkDestroyBuffer(device, hash_buffer, None)
@@ -480,12 +527,18 @@ class VulkanCarrierDispatcher:
             if owns_handles and active_handles is not None:
                 active_handles.close()
 
-    def _prepare_inputs(self, carrier: Carrier) -> Tuple[np.ndarray, np.ndarray]:
+    def _prepare_inputs(self, carrier: Carrier) -> Tuple[np.ndarray, np.ndarray, int, int]:
         sign_in = carrier.sign.astype(np.int32, copy=False)
         support_in = carrier.support.astype(np.uint32, copy=False)
         flat_sign = sign_in.reshape(-1)
         flat_support = support_in.reshape(-1)
-        return flat_sign, flat_support
+        if sign_in.ndim == 1:
+            k = 1
+            n = sign_in.shape[0]
+        else:
+            k = sign_in.shape[0]
+            n = int(sign_in.size // k)
+        return flat_sign, flat_support, n, k
 
     def _build_layouts(self, device):
         bindings = []
@@ -505,10 +558,17 @@ class VulkanCarrierDispatcher:
             pBindings=bindings,
         )
         descriptor_set_layout = vk.vkCreateDescriptorSetLayout(device, layout_info, None)
+        push_range = vk.VkPushConstantRange(
+            stageFlags=vk.VK_SHADER_STAGE_COMPUTE_BIT,
+            offset=0,
+            size=8,  # two uint32: n, k
+        )
         pipeline_layout_info = vk.VkPipelineLayoutCreateInfo(
             sType=vk.VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
             setLayoutCount=1,
             pSetLayouts=[descriptor_set_layout],
+            pushConstantRangeCount=1,
+            pPushConstantRanges=[push_range],
         )
         pipeline_layout = vk.vkCreatePipelineLayout(device, pipeline_layout_info, None)
         return descriptor_set_layout, pipeline_layout
@@ -658,11 +718,14 @@ class VulkanCarrierDispatcher:
         descriptor_set = vk.vkAllocateDescriptorSets(device, alloc_info)[0]
         return descriptor_pool, descriptor_set
 
-    def _bind_buffers(self, device, descriptor_set, buffers, arrays):
+    def _bind_buffers(self, device, descriptor_set, buffers: dict, arrays: dict):
+        order = getattr(self.config, "binding_order", ("support_in", "sign_in", "support_out", "sign_out"))
         writes = []
-        for binding, (buffer, arr) in enumerate(zip(buffers, arrays)):
+        for binding, name in enumerate(order):
+            buf = buffers[name]
+            arr = arrays[name]
             buffer_info = vk.VkDescriptorBufferInfo(
-                buffer=buffer,
+                buffer=buf,
                 offset=0,
                 range=arr.nbytes,
             )
@@ -705,6 +768,7 @@ class VulkanCarrierDispatcher:
         queue,
         global_size: int,
         dispatch_count: int = 1,
+        push_consts: Tuple[int, int] = (0, 0),
     ) -> float:
         begin_info = vk.VkCommandBufferBeginInfo(
             sType=vk.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
@@ -721,6 +785,16 @@ class VulkanCarrierDispatcher:
             [descriptor_set],
             0,
             None,
+        )
+        # push constants: n, k
+        n_val, k_val = push_consts
+        vk.vkCmdPushConstants(
+            command_buffer,
+            pipeline_layout,
+            vk.VK_SHADER_STAGE_COMPUTE_BIT,
+            0,
+            8,
+            (ctypes.c_uint * 2)(n_val, k_val),
         )
         gx = (global_size + self.config.workgroup[0] - 1) // self.config.workgroup[0]
         for _ in range(dispatch_count):
@@ -750,10 +824,14 @@ class VulkanCarrierDispatcher:
         descriptor_set,
         queue,
         global_size: int,
-        staging_in,
-        device_in,
-        staging_out,
-        device_out,
+        staging_support_in,
+        staging_sign_in,
+        device_support_in,
+        device_sign_in,
+        staging_support_out,
+        staging_sign_out,
+        device_support_out,
+        device_sign_out,
         sign_nbytes: int,
         support_nbytes: int,
         dispatch_count: int,
@@ -763,6 +841,7 @@ class VulkanCarrierDispatcher:
         hash_push_constant: int,
         hash_spv_path: Optional[Path],
         hash_handles: dict,
+        push_consts: Tuple[int, int],
     ):
         begin_info = vk.VkCommandBufferBeginInfo(
             sType=vk.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
@@ -773,17 +852,17 @@ class VulkanCarrierDispatcher:
         # Copy staging inputs -> device-local inputs
         vk.vkCmdCopyBuffer(
             command_buffer,
-            staging_in[0],
-            device_in[0],
+            staging_support_in,
+            device_support_in,
             1,
-            [vk.VkBufferCopy(srcOffset=0, dstOffset=0, size=sign_nbytes)],
+            [vk.VkBufferCopy(srcOffset=0, dstOffset=0, size=support_nbytes)],
         )
         vk.vkCmdCopyBuffer(
             command_buffer,
-            staging_in[1],
-            device_in[1],
+            staging_sign_in,
+            device_sign_in,
             1,
-            [vk.VkBufferCopy(srcOffset=0, dstOffset=0, size=support_nbytes)],
+            [vk.VkBufferCopy(srcOffset=0, dstOffset=0, size=sign_nbytes)],
         )
 
         # Barrier to make transfer writes visible to shader reads
@@ -794,9 +873,9 @@ class VulkanCarrierDispatcher:
                 dstAccessMask=vk.VK_ACCESS_SHADER_READ_BIT,
                 srcQueueFamilyIndex=vk.VK_QUEUE_FAMILY_IGNORED,
                 dstQueueFamilyIndex=vk.VK_QUEUE_FAMILY_IGNORED,
-                buffer=device_in[0],
+                buffer=device_support_in,
                 offset=0,
-                size=sign_nbytes,
+                size=support_nbytes,
             ),
             vk.VkBufferMemoryBarrier(
                 sType=vk.VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
@@ -804,9 +883,9 @@ class VulkanCarrierDispatcher:
                 dstAccessMask=vk.VK_ACCESS_SHADER_READ_BIT,
                 srcQueueFamilyIndex=vk.VK_QUEUE_FAMILY_IGNORED,
                 dstQueueFamilyIndex=vk.VK_QUEUE_FAMILY_IGNORED,
-                buffer=device_in[1],
+                buffer=device_sign_in,
                 offset=0,
-                size=support_nbytes,
+                size=sign_nbytes,
             ),
         ]
         vk.vkCmdPipelineBarrier(
@@ -834,6 +913,15 @@ class VulkanCarrierDispatcher:
             0,
             None,
         )
+        n_val, k_val = push_consts
+        vk.vkCmdPushConstants(
+            command_buffer,
+            pipeline_layout,
+            vk.VK_SHADER_STAGE_COMPUTE_BIT,
+            0,
+            8,
+            (ctypes.c_uint * 2)(n_val, k_val),
+        )
         gx = (global_size + self.config.workgroup[0] - 1) // self.config.workgroup[0]
         for _ in range(dispatch_count):
             vk.vkCmdDispatch(command_buffer, gx, self.config.workgroup[1], self.config.workgroup[2])
@@ -846,9 +934,9 @@ class VulkanCarrierDispatcher:
                 dstAccessMask=vk.VK_ACCESS_TRANSFER_READ_BIT,
                 srcQueueFamilyIndex=vk.VK_QUEUE_FAMILY_IGNORED,
                 dstQueueFamilyIndex=vk.VK_QUEUE_FAMILY_IGNORED,
-                buffer=device_out[0],
+                buffer=device_support_out,
                 offset=0,
-                size=sign_nbytes,
+                size=support_nbytes,
             ),
             vk.VkBufferMemoryBarrier(
                 sType=vk.VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
@@ -856,9 +944,9 @@ class VulkanCarrierDispatcher:
                 dstAccessMask=vk.VK_ACCESS_TRANSFER_READ_BIT,
                 srcQueueFamilyIndex=vk.VK_QUEUE_FAMILY_IGNORED,
                 dstQueueFamilyIndex=vk.VK_QUEUE_FAMILY_IGNORED,
-                buffer=device_out[1],
+                buffer=device_sign_out,
                 offset=0,
-                size=support_nbytes,
+                size=sign_nbytes,
             ),
         ]
         vk.vkCmdPipelineBarrier(
@@ -912,7 +1000,7 @@ class VulkanCarrierDispatcher:
                     "hash_descriptor_pool": hash_descriptor_pool,
                 }
             )
-            self._bind_hash_buffers(device, hash_descriptor_set, device_out[0], device_out[1], hash_buffer)
+            self._bind_hash_buffers(device, hash_descriptor_set, device_sign_out, device_support_out, hash_buffer)
             vk.vkCmdBindPipeline(command_buffer, vk.VK_PIPELINE_BIND_POINT_COMPUTE, hash_pipeline)
             vk.vkCmdBindDescriptorSets(
                 command_buffer,
@@ -968,17 +1056,17 @@ class VulkanCarrierDispatcher:
             # Copy outputs back to staging
             vk.vkCmdCopyBuffer(
                 command_buffer,
-                device_out[0],
-                staging_out[0],
+                device_support_out,
+                staging_support_out,
                 1,
-                [vk.VkBufferCopy(srcOffset=0, dstOffset=0, size=sign_nbytes)],
+                [vk.VkBufferCopy(srcOffset=0, dstOffset=0, size=support_nbytes)],
             )
             vk.vkCmdCopyBuffer(
                 command_buffer,
-                device_out[1],
-                staging_out[1],
+                device_sign_out,
+                staging_sign_out,
                 1,
-                [vk.VkBufferCopy(srcOffset=0, dstOffset=0, size=support_nbytes)],
+                [vk.VkBufferCopy(srcOffset=0, dstOffset=0, size=sign_nbytes)],
             )
 
         vk.vkEndCommandBuffer(command_buffer)

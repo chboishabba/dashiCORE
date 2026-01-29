@@ -1,0 +1,89 @@
+#version 450
+// Buffer sizing (host-side)
+// n_p_words = ceil(n / 32)
+// v1:
+// n_blocks = ceil(n / B_sites)
+// total_support = Q_block_base[n_blocks] (bits)
+// v2:
+// n_sb = ceil(n / SB_sites)
+// total_support = Q_SB_base[n_sb] (bits)
+// n_q_words = ceil(total_support / 32)
+// Required zeroing
+// Before pq_pack_Q_words_v1.comp:
+// memset Q_words to 0.
+// Performance
+// v1 pq_pack_Q_words_v1.comp is correct but not fast due to rank.
+
+
+layout(local_size_x = 256) in;
+
+layout(std430, set=0, binding=0) readonly buffer P   { uint P_words[]; };
+layout(std430, set=0, binding=1) readonly buffer QSB { uint Q_SB_base[]; };     // [n_sb+1] bits
+layout(std430, set=0, binding=2) readonly buffer CP  { uint chunk_prefix[]; };  // [n_sb*n_chunks] bits
+layout(std430, set=0, binding=3) readonly buffer Q   { uint Q_words[]; };
+layout(std430, set=0, binding=4) writeonly buffer S  { int s_out[]; };          // -1,0,+1
+
+layout(push_constant) uniform PC {
+    uint n;
+    uint n_p_words;
+    uint n_q_words;
+    uint SB_sites;
+    uint C_sites;
+    uint n_chunks;
+    uint sign_one_is_positive; // 1 => Qbit 1 means +1
+} pc;
+
+bool get_P(uint i) {
+    uint w = i >> 5;
+    uint bit = i & 31u;
+    if (w >= pc.n_p_words) return false;
+    return ((P_words[w] >> bit) & 1u) != 0u;
+}
+
+bool get_Q(uint q_bit) {
+    uint w = q_bit >> 5;
+    uint bit = q_bit & 31u;
+    if (w >= pc.n_q_words) return false;
+    return ((Q_words[w] >> bit) & 1u) != 0u;
+}
+
+uint popcount_in_chunk_upto(uint chunk_start, uint i) {
+    // count supported bits in [chunk_start, i)
+    uint w0 = chunk_start >> 5;
+    uint w  = i >> 5;
+    uint bit = i & 31u;
+
+    uint r = 0u;
+    for (uint ww = w0; ww < w; ww++) {
+        if (ww < pc.n_p_words) r += uint(bitCount(P_words[ww]));
+    }
+    if (w < pc.n_p_words && bit != 0u) {
+        uint m = P_words[w] & ((1u << bit) - 1u);
+        r += uint(bitCount(m));
+    }
+    return r;
+}
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= pc.n) return;
+
+    if (!get_P(i)) {
+        s_out[i] = 0;
+        return;
+    }
+
+    uint sb = i / pc.SB_sites;
+    uint in_sb = i - sb * pc.SB_sites;
+    uint ch = in_sb / pc.C_sites;
+
+    uint chunk_start = sb * pc.SB_sites + ch * pc.C_sites;
+
+    uint base = Q_SB_base[sb] + chunk_prefix[sb * pc.n_chunks + ch];
+    uint r_local = popcount_in_chunk_upto(chunk_start, i);
+    uint q_bit = base + r_local;
+
+    bool q = get_Q(q_bit);
+    bool pos = (pc.sign_one_is_positive == 1u) ? q : (!q);
+    s_out[i] = pos ? 1 : -1;
+}

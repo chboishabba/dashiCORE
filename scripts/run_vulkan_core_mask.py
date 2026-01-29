@@ -2,7 +2,7 @@
 Smoke test for the CORE mask Vulkan shader.
 
 Steps:
-1) Compile gpu_shaders/core_mask.comp -> .spv (on-demand).
+1) Compile spv/comp/core_mask.comp -> spv/core_mask.spv (on-demand, fallback to gpu_shaders).
 2) Register a Vulkan backend (no CPU fallback).
 3) Dispatch the mask shader on a sample Carrier and compare with CPU reference.
 
@@ -26,6 +26,7 @@ if str(ROOT) not in sys.path:
 
 from dashi_core.backend import use_backend
 from dashi_core.carrier import Carrier
+from gpu_common_methods import resolve_shader
 from gpu_vulkan_backend import make_vulkan_kernel, register_default_vulkan_backend
 
 
@@ -40,7 +41,7 @@ def cpu_core_mask(carrier: Carrier) -> Carrier:
 def main() -> None:
     backend = register_default_vulkan_backend(
         name="vulkan_core_mask",
-        shader_path=Path("gpu_shaders/core_mask.comp"),
+        shader_path=resolve_shader("core_mask"),
     )
     kernel = make_vulkan_kernel(backend)
 

@@ -1,0 +1,41 @@
+#version 450
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(std430, set=0, binding=0) readonly buffer OmegaBuf {
+    float data[];
+} omega_buf;
+
+layout(std430, set=0, binding=1) writeonly buffer DxBuf {
+    float data[];
+} dwdx_buf;
+
+layout(std430, set=0, binding=2) writeonly buffer DyBuf {
+    float data[];
+} dwdy_buf;
+
+layout(push_constant) uniform PC {
+    uint N;
+    float inv_2dx;
+} pc;
+
+void main() {
+    uint x = gl_GlobalInvocationID.x;
+    uint y = gl_GlobalInvocationID.y;
+    if (x >= pc.N || y >= pc.N) {
+        return;
+    }
+    uint N = pc.N;
+    uint xp = (x + 1) % N;
+    uint xm = (x + N - 1) % N;
+    uint yp = (y + 1) % N;
+    uint ym = (y + N - 1) % N;
+
+    uint idx = y * N + x;
+    float oxp = omega_buf.data[y * N + xp];
+    float oxm = omega_buf.data[y * N + xm];
+    float oyp = omega_buf.data[yp * N + x];
+    float oym = omega_buf.data[ym * N + x];
+
+    dwdx_buf.data[idx] = (oxp - oxm) * pc.inv_2dx;
+    dwdy_buf.data[idx] = (oyp - oym) * pc.inv_2dx;
+}

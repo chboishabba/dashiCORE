@@ -1,0 +1,28 @@
+#version 450
+layout(local_size_x = 256) in;
+
+layout(std430, set=0, binding=0) readonly buffer X  { float x[]; };
+layout(std430, set=0, binding=1) writeonly buffer SM { uint support_words[]; };
+layout(std430, set=0, binding=2) writeonly buffer SG { uint sign_words[]; };
+
+layout(push_constant) uniform PC {
+    uint n;
+    float eps;
+} pc;
+
+// This shader writes one bit per element using atomics.
+// If you want *no atomics*, see note below.
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= pc.n) return;
+
+    bool sup = abs(x[i]) > pc.eps;
+    bool neg = x[i] < 0.0;
+
+    uint word = i >> 5;          // /32
+    uint bit  = i & 31;          // %32
+    uint mask = 1u << bit;
+
+    if (sup) atomicOr(support_words[word], mask);
+    if (sup && neg) atomicOr(sign_words[word], mask);
+}

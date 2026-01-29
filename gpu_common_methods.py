@@ -2,7 +2,49 @@ from __future__ import annotations
 
 import os
 import pathlib
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable, Optional, Sequence
+
+CORE_ROOT = pathlib.Path(__file__).resolve().parent
+SPV_COMP_DIR = CORE_ROOT / "spv" / "comp"
+SPV_DIR = CORE_ROOT / "spv"
+LEGACY_SHADER_DIR = CORE_ROOT / "gpu_shaders"
+
+
+def resolve_shader(name: str) -> pathlib.Path:
+    """
+    Resolve a GLSL compute shader by name.
+
+    Prefers dashiCORE/spv/comp/{name}.comp, falls back to dashiCORE/gpu_shaders/{name}.comp.
+    """
+    preferred = SPV_COMP_DIR / f"{name}.comp"
+    if preferred.exists():
+        return preferred
+    legacy = LEGACY_SHADER_DIR / f"{name}.comp"
+    if legacy.exists():
+        return legacy
+    return preferred
+
+
+def resolve_shader_candidates(names: Sequence[str]) -> pathlib.Path:
+    """
+    Resolve the first available shader from a list of candidate names.
+    """
+    last = None
+    for name in names:
+        path = resolve_shader(name)
+        last = path
+        if path.exists():
+            return path
+    if last is None:
+        raise ValueError("resolve_shader_candidates called with empty names")
+    return last
+
+
+def resolve_spv(name: str) -> pathlib.Path:
+    """
+    Resolve SPIR-V output path for a shader name into dashiCORE/spv/{name}.spv.
+    """
+    return SPV_DIR / f"{name}.spv"
 
 
 def compile_shader(
@@ -17,6 +59,7 @@ def compile_shader(
     """
     if not shader_path.exists():
         raise FileNotFoundError(shader_path)
+    spv_path.parent.mkdir(parents=True, exist_ok=True)
     if spv_path.exists() and spv_path.stat().st_mtime >= shader_path.stat().st_mtime:
         return
     define_args = [f"-D{define}" for define in defines or []]

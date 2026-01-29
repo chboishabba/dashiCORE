@@ -1,0 +1,31 @@
+#version 450
+layout(local_size_x = 256) in;
+
+/*
+SCATTER_ADD segmented deterministic
+For each segment k:
+  j = keys[k]
+  dst[j] += sum_{t in [seg_starts[k], seg_ends[k])} src[t]
+Host must prepare grouped segments (CSR-like).
+*/
+
+layout(std430, set=0, binding=0) readonly buffer SRC { float src[]; };
+layout(std430, set=0, binding=1) readonly buffer KEYS { uint keys[]; };
+layout(std430, set=0, binding=2) readonly buffer SS { uint seg_starts[]; };
+layout(std430, set=0, binding=3) readonly buffer SE { uint seg_ends[]; };
+layout(std430, set=0, binding=4) buffer DST { float dst[]; };
+
+layout(push_constant) uniform PC { uint n_segments; } pc;
+
+void main() {
+  uint k = gl_GlobalInvocationID.x;
+  if (k >= pc.n_segments) return;
+
+  uint j = keys[k];
+  uint s = seg_starts[k];
+  uint e = seg_ends[k];
+
+  float acc = 0.0;
+  for (uint t = s; t < e; t++) acc += src[t];   // fixed order => deterministic
+  dst[j] += acc;
+}

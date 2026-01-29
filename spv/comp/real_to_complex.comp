@@ -1,0 +1,22 @@
+#version 450
+layout(local_size_x = 256) in;
+
+layout(std430, set=0, binding=0) readonly buffer InBuf {
+    float data[];
+} in_buf;
+
+layout(std430, set=0, binding=1) writeonly buffer OutBuf {
+    vec2 data[];
+} out_buf;
+
+layout(push_constant) uniform PC {
+    uint n;
+} pc;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= pc.n) {
+        return;
+    }
+    out_buf.data[idx] = vec2(in_buf.data[idx], 0.0);
+}

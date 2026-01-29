@@ -1,0 +1,35 @@
+#version 450
+#extension GL_EXT_shader_atomic_float : require
+layout(local_size_x = 256) in;
+
+/*
+FUSED ATOMIC NONLINEAR EXPLODE:
+for tile in [0..n_tiles):
+  j = dst_base + tile*tile_stride + i
+  dst[j] += phi(src[i])   (atomic)
+*/
+
+layout(std430, set=0, binding=0) readonly buffer SRC { float src[]; };
+layout(std430, set=0, binding=1) buffer DST { float dst[]; };
+
+layout(push_constant) uniform PC {
+  uint n;
+  uint n_tiles;
+  uint dst_base;
+  uint tile_stride; // elements between tiles in dst
+} pc;
+
+float phi(float x) {
+  // ReLU example (swap for tanh/sigmoid/etc as desired)
+  return x > 0.0 ? x : 0.0;
+}
+
+void main() {
+  uint gid = gl_GlobalInvocationID.x;
+  uint i = gid % pc.n;
+  uint tile = gid / pc.n;
+  if (tile >= pc.n_tiles) return;
+
+  uint j = pc.dst_base + tile * pc.tile_stride + i;
+  atomicAdd(dst[j], phi(src[i]));
+}

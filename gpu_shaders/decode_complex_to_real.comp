@@ -1,0 +1,31 @@
+#version 450
+
+// Copy real part of complex field to real buffer with optional scaling.
+// Input: vec2 (real, imag) flattened row-major N x N grid.
+// Output: float real field.
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer ComplexIn {
+    vec2 data[];
+} complex_in;
+
+layout(std430, set = 0, binding = 1) writeonly buffer RealOut {
+    float data[];
+} real_out;
+
+layout(push_constant) uniform PushConsts {
+    uint N;
+    float scale;
+} pc;
+
+void main() {
+    uint x = gl_GlobalInvocationID.x;
+    uint y = gl_GlobalInvocationID.y;
+    if (x >= pc.N || y >= pc.N) {
+        return;
+    }
+    uint idx = y * pc.N + x;
+    float v = complex_in.data[idx].x * pc.scale;
+    real_out.data[idx] = v;
+}

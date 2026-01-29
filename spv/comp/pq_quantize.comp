@@ -1,0 +1,24 @@
+#version 450
+layout(local_size_x = 256) in;
+
+layout(std430, set=0, binding=0) readonly buffer X { float x[]; };
+layout(std430, set=0, binding=1) writeonly buffer Q { int q[]; };
+
+layout(push_constant) uniform PC {
+    uint n;
+    float scale;   // >0
+    int qmax;      // e.g. 127 for 8-bit symmetric
+} pc;
+
+int clampi(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); }
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= pc.n) return;
+
+    float xi = x[i] / pc.scale;
+    // round-to-nearest (ties away from zero-ish)
+    int qi = int(round(xi));
+    qi = clampi(qi, -pc.qmax, pc.qmax);
+    q[i] = qi;
+}

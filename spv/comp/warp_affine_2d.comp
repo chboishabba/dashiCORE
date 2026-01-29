@@ -1,0 +1,52 @@
+#version 450
+layout(local_size_x = 16, local_size_y = 16) in;
+
+/*
+WARP_AFFINE_2D:
+dst(x,y) = src( A_tile * [x,y,1] )
+Per-tile affine parameters (a,b,c,d,e,f)
+Nearest-neighbour sampling (deterministic).
+*/
+
+layout(std430, set=0, binding=0) readonly buffer SRC { float src[]; };
+layout(std430, set=0, binding=1) writeonly buffer DST { float dst[]; };
+layout(std430, set=0, binding=2) readonly buffer AFF { float tile_affine[]; }; // 6 floats per tile
+
+layout(push_constant) uniform PC {
+  uint w;            // width
+  uint h;            // height
+  uint tile_w;       // tile width (pixels)
+  uint tile_h;       // tile height
+  uint tiles_x;      // number of tiles in x
+} pc;
+
+int clampi(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); }
+
+void main() {
+  uint x = gl_GlobalInvocationID.x;
+  uint y = gl_GlobalInvocationID.y;
+  if (x >= pc.w || y >= pc.h) return;
+
+  uint tx = x / pc.tile_w;
+  uint ty = y / pc.tile_h;
+  uint tile = ty * pc.tiles_x + tx;
+
+  uint base = tile * 6u;
+  float a = tile_affine[base + 0u];
+  float b = tile_affine[base + 1u];
+  float c = tile_affine[base + 2u];
+  float d = tile_affine[base + 3u];
+  float e = tile_affine[base + 4u];
+  float f = tile_affine[base + 5u];
+
+  float xs = a * float(x) + b * float(y) + c;
+  float ys = d * float(x) + e * float(y) + f;
+
+  int xi = int(round(xs));
+  int yi = int(round(ys));
+
+  xi = clampi(xi, 0, int(pc.w) - 1);
+  yi = clampi(yi, 0, int(pc.h) - 1);
+
+  dst[y * pc.w + x] = src[uint(yi) * pc.w + uint(xi)];
+}

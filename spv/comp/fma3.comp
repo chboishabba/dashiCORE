@@ -1,0 +1,24 @@
+#version 450
+layout(local_size_x = 256) in;
+
+/*
+FMA3:
+out[i] = a*x[i] + b*y[i] + c
+*/
+
+layout(std430, set=0, binding=0) readonly buffer X { float x[]; };
+layout(std430, set=0, binding=1) readonly buffer Y { float y[]; };
+layout(std430, set=0, binding=2) writeonly buffer O { float outv[]; };
+
+layout(push_constant) uniform PC {
+  uint n;
+  float a;
+  float b;
+  float c;
+} pc;
+
+void main() {
+  uint i = gl_GlobalInvocationID.x;
+  if (i >= pc.n) return;
+  outv[i] = pc.a * x[i] + pc.b * y[i] + pc.c;
+}

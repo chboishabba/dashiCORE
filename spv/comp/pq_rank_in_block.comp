@@ -1,0 +1,47 @@
+// Utility rank helper used by PQ shaders.
+#version 450
+layout(local_size_x = 256) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer PBuffer {
+    uint P_words[];
+};
+
+layout(std430, set = 0, binding = 1) writeonly buffer RBuffer {
+    uint ranks[];
+};
+
+layout(push_constant) uniform PC {
+    uint start_site;   // block-aligned start site
+    uint n;            // number of sites to process
+    uint n_p_words;    // ceil(total_sites / 32)
+} pc;
+
+uint pq_rank_in_range(uint start_site, uint i) {
+    uint start_word = start_site >> 5;
+    uint word       = i >> 5;
+    uint bit        = i & 31u;
+
+    uint r = 0u;
+
+    // full words strictly before i
+    for (uint w = start_word; w < word; w++) {
+        if (w < pc.n_p_words)
+            r += uint(bitCount(P_words[w]));
+    }
+
+    // partial word up to bit
+    if (word < pc.n_p_words && bit != 0u) {
+        uint mask = (1u << bit) - 1u;
+        r += uint(bitCount(P_words[word] & mask));
+    }
+
+    return r;
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= pc.n) return;
+
+    uint site = pc.start_site + idx;
+    ranks[idx] = pq_rank_in_range(pc.start_site, site);
+}

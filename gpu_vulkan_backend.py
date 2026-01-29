@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Iterable, Optional, Tuple
 
 from dashi_core.backend import BackendCapabilities, register_backend
+from gpu_common_methods import resolve_shader, resolve_spv
 from gpu_vulkan_adapter import DispatchFn, VulkanBackendAdapter, VulkanCarrierKernel, VulkanKernelConfig
 from gpu_vulkan_dispatcher import VulkanDispatchConfig, build_vulkan_dispatcher
 
@@ -85,8 +87,19 @@ def register_default_vulkan_backend(
     (no silent CPU passthrough).
     """
 
-    shader = shader_path or Path("gpu_shaders/core_mask.comp")
-    spv = spv_path or shader.with_suffix(".spv")
+    shader = shader_path or resolve_shader("core_mask")
+    spv = spv_path or resolve_spv(shader.stem)
+
+    # Binding order depends on the shader.
+    # core_mask_majority expects support, sign, support_out, sign_out.
+    # legacy core_mask expects sign, support, sign_out, support_out.
+    binding_order = ("support_in", "sign_in", "support_out", "sign_out")
+    shader_name = (shader.stem if shader else "")
+    if shader_name == "core_mask":
+        binding_order = ("sign_in", "support_in", "sign_out", "support_out")
+
+    if shader_name == "core_mask_majority" and workgroup == (64, 1, 1):
+        workgroup = (256, 1, 1)
 
     config = VulkanKernelConfig(
         shader_path=shader,
@@ -94,6 +107,7 @@ def register_default_vulkan_backend(
         workgroup=workgroup,
         compile_on_dispatch=True,
         compile_on_init=False,
+        binding_order=binding_order,
     )
 
     dispatch_cfg = VulkanDispatchConfig(device_index=device_index, memory_mode=memory_mode)
@@ -122,11 +136,10 @@ def probe_and_register_vulkan_backend(
     Returns (backend, icd_path). If no ICD works or Vulkan is unavailable,
     returns (None, None) without raising, leaving the caller to fall back to CPU.
     """
-    import os
     import subprocess
 
-    shader = shader_path or Path("gpu_shaders/core_mask_majority.comp")
-    spv = spv_path or shader.with_suffix(".spv")
+    shader = shader_path or resolve_shader("core_mask_majority")
+    spv = spv_path or resolve_spv(shader.stem)
 
     # Default ICD search paths
     candidates: Iterable[Path]
@@ -145,24 +158,34 @@ def probe_and_register_vulkan_backend(
     else:
         candidates = icd_candidates
 
+    debug = os.getenv("DASHI_VULKAN_DEBUG")
+
     for icd in candidates:
         if not icd.is_file():
             continue
         env = dict(os.environ)
         env["VK_ICD_FILENAMES"] = str(icd)
+        # Light-touch validation: run vulkaninfo --summary if available. If it fails, fall through
+        # and still attempt registration so we can see the real Vulkan error (permission, missing /dev/dri, etc.).
         try:
-            # Light-touch validation: run vulkaninfo --summary if available.
             if subprocess.call(
                 ["which", "vulkaninfo"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
             ) == 0:
-                subprocess.check_call(
-                    ["vulkaninfo", "--summary"],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    env=env,
-                )
-        except Exception:
-            continue
+                try:
+                    subprocess.check_call(
+                        ["vulkaninfo", "--summary"],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        env=env,
+                    )
+                except Exception as exc:
+                    if debug:
+                        print(f"[vk][probe] vulkaninfo failed for {icd} (continuing): {exc}")
+            elif debug:
+                print(f"[vk][probe] vulkaninfo not installed; skipping check for {icd}")
+        except Exception as exc:
+            if debug:
+                print(f"[vk][probe] vulkaninfo check raised (continuing) for {icd}: {exc}")
         try:
             backend = register_default_vulkan_backend(
                 name=name,
@@ -173,8 +196,12 @@ def probe_and_register_vulkan_backend(
                 memory_mode=memory_mode,
                 allow_fallback=False,
             )
+            if debug:
+                print(f"[vk][probe] registered backend via {icd}")
             return backend, icd
-        except Exception:
+        except Exception as exc:
             # Try next ICD
+            if debug:
+                print(f"[vk][probe] backend registration failed for {icd}: {exc}")
             continue
     return None, None

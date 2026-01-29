@@ -1,0 +1,24 @@
+#version 450
+// Simple GEMV: y = A * x
+// A is row-major N x N, x is length N, y is length N.
+// Push constant provides N. local_size_x can be tuned; default 256.
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, binding = 0) readonly buffer MatBuf { float A[]; };
+layout(std430, binding = 1) readonly buffer VecBuf { float X[]; };
+layout(std430, binding = 2) writeonly buffer OutBuf { float Y[]; };
+
+layout(push_constant) uniform PushConsts { uint N; } pc;
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    uint N = pc.N;
+    if (i >= N) return;
+    float acc = 0.0;
+    uint base = i * N;
+    for (uint j = 0; j < N; ++j) {
+        acc += A[base + j] * X[j];
+    }
+    Y[i] = acc;
+}

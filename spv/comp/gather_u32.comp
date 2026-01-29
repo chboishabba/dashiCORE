@@ -1,0 +1,19 @@
+#version 450
+layout(local_size_x = 256) in;
+
+/*
+GATHER_U32:
+out[i] = in[idx[i]]
+*/
+
+layout(std430, set=0, binding=0) readonly buffer IN  { uint in_u32[]; };
+layout(std430, set=0, binding=1) readonly buffer IDX { uint idx[]; };
+layout(std430, set=0, binding=2) writeonly buffer OUT { uint out_u32[]; };
+
+layout(push_constant) uniform PC { uint n; } pc;
+
+void main() {
+  uint i = gl_GlobalInvocationID.x;
+  if (i >= pc.n) return;
+  out_u32[i] = in_u32[idx[i]];
+}

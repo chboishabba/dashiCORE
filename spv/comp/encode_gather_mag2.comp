@@ -1,0 +1,23 @@
+#version 450
+layout(local_size_x = 256) in;
+
+/*
+ENCODE_GATHER_MAG2:
+For each midband candidate index, gather |omega_hat|^2 into scores.
+*/
+
+layout(std430, set=0, binding=0) readonly buffer OmegaHat { vec2 omega_hat[]; };
+layout(std430, set=0, binding=1) readonly buffer MidIdx   { uint mid_idx[]; };
+layout(std430, set=0, binding=2) writeonly buffer Scores  { float scores[]; };
+
+layout(push_constant) uniform PC {
+  uint n;
+} pc;
+
+void main() {
+  uint gid = gl_GlobalInvocationID.x;
+  if (gid >= pc.n) return;
+  uint idx = mid_idx[gid];
+  vec2 v = omega_hat[idx];
+  scores[gid] = v.x * v.x + v.y * v.y;
+}

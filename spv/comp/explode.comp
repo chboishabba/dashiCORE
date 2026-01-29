@@ -1,0 +1,30 @@
+#version 450
+layout(local_size_x = 256) in;
+
+/*
+EXPLODE:
+for tile in [0, n_tiles):
+  dst[dst_base + tile*tile_stride + i] = src[i], for i in [0, n)
+*/
+
+layout(std430, set=0, binding=0) readonly buffer SRC { float src[]; };
+layout(std430, set=0, binding=1) writeonly buffer DST { float dst[]; };
+
+layout(push_constant) uniform PC {
+  uint n;           // length of src
+  uint n_tiles;     // number of replicas
+  uint dst_base;    // base offset in dst (elements)
+  uint tile_stride; // stride between tiles in dst (elements)
+} pc;
+
+void main() {
+  uint gid = gl_GlobalInvocationID.x;
+
+  // map gid -> (tile, i)
+  uint i = gid % pc.n;
+  uint tile = gid / pc.n;
+  if (tile >= pc.n_tiles) return;
+
+  uint out_idx = pc.dst_base + tile * pc.tile_stride + i;
+  dst[out_idx] = src[i];
+}

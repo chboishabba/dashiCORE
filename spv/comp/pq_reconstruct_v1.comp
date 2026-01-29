@@ -1,0 +1,67 @@
+#version 450
+layout(local_size_x = 256) in;
+
+layout(std430, set=0, binding=0) readonly buffer P  { uint P_words[]; };
+layout(std430, set=0, binding=1) readonly buffer QB { uint Q_block_base[]; }; // bits
+layout(std430, set=0, binding=2) readonly buffer Q  { uint Q_words[]; };
+layout(std430, set=0, binding=3) writeonly buffer S { int s_out[]; };         // -1,0,+1
+
+layout(push_constant) uniform PC {
+    uint n;
+    uint B_sites;
+    uint n_blocks;
+    uint n_p_words;
+    uint n_q_words;
+    uint sign_one_is_positive; // 1 => Qbit 1 means +1, else inverted
+} pc;
+
+uint popcount_upto_in_block(uint start_site, uint idx, uint n_p_words_local) {
+    // rank = popcount(P[start_word .. word-1]) + popcount(P[word] & ((1<<bit)-1))
+    uint start_word = start_site >> 5;
+    uint word = idx >> 5;
+    uint bit = idx & 31u;
+
+    uint r = 0u;
+    for (uint w = start_word; w < word; w++) {
+        if (w < n_p_words_local) r += uint(bitCount(P_words[w]));
+    }
+    if (word < n_p_words_local && bit != 0u) {
+        uint m = P_words[word] & ((1u << bit) - 1u);
+        r += uint(bitCount(m));
+    }
+    return r;
+}
+
+bool get_P(uint i) {
+    uint w = i >> 5;
+    uint bit = i & 31u;
+    if (w >= pc.n_p_words) return false;
+    return ((P_words[w] >> bit) & 1u) != 0u;
+}
+
+bool get_Q(uint q_bit) {
+    uint w = q_bit >> 5;
+    uint bit = q_bit & 31u;
+    if (w >= pc.n_q_words) return false;
+    return ((Q_words[w] >> bit) & 1u) != 0u;
+}
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= pc.n) return;
+
+    if (!get_P(i)) {
+        s_out[i] = 0;
+        return;
+    }
+
+    uint b = i / pc.B_sites;
+    uint start = b * pc.B_sites;
+
+    uint r = popcount_upto_in_block(start, i, pc.n_p_words);
+    uint q_bit = Q_block_base[b] + r;
+
+    bool q = get_Q(q_bit);
+    bool pos = (pc.sign_one_is_positive == 1u) ? q : (!q);
+    s_out[i] = pos ? 1 : -1;
+}

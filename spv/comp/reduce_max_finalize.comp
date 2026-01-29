@@ -1,0 +1,50 @@
+#version 450
+layout(local_size_x = 256) in;
+
+/*
+REDUCE_MAX_FINALIZE:
+Take partials[0..n_partials) and reduce to global best.
+Outputs best_index + best_value_bits.
+*/
+
+layout(std430, set=0, binding=0) readonly buffer PART { uvec2 partials[]; };
+layout(std430, set=0, binding=1) writeonly buffer OUT { uvec2 best_out[]; }; // [1] (index, value_bits)
+
+layout(push_constant) uniform PC {
+  uint n_partials;
+} pc;
+
+shared float sh_val[256];
+shared uint  sh_idx[256];
+
+void main() {
+  uint lid = gl_LocalInvocationID.x;
+
+  float v = -3.402823e38;
+  uint  i = 0u;
+
+  if (lid < pc.n_partials) {
+    uvec2 p = partials[lid];
+    i = p.x;
+    v = uintBitsToFloat(p.y);
+  }
+
+  sh_val[lid] = v;
+  sh_idx[lid] = i;
+  barrier();
+
+  for (uint stride = 128; stride > 0; stride >>= 1) {
+    if (lid < stride) {
+      float v0 = sh_val[lid];
+      float v1 = sh_val[lid + stride];
+      uint  i0 = sh_idx[lid];
+      uint  i1 = sh_idx[lid + stride];
+
+      bool take1 = (v1 > v0) || (v1 == v0 && i1 < i0);
+      if (take1) { sh_val[lid] = v1; sh_idx[lid] = i1; }
+    }
+    barrier();
+  }
+
+  if (lid == 0) best_out[0] = uvec2(sh_idx[0], floatBitsToUint(sh_val[0]));
+}

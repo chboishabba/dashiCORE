@@ -29,7 +29,7 @@ from dashi_core.carrier import Carrier  # noqa: E402
 from dashi_core.kernel import Kernel  # noqa: E402
 from benchmarks.hardware import cpu_cache_info, recommend_pq_block_elems  # noqa: E402
 from pq import decode_pq_to_carrier, encode_carrier_to_pq  # noqa: E402
-from gpu_common_methods import compile_shader  # noqa: E402
+from gpu_common_methods import compile_shader, resolve_shader, resolve_spv  # noqa: E402
 from gpu_vulkan_backend import VulkanKernelConfig  # noqa: E402
 from gpu_vulkan_dispatcher import DispatchTiming, VulkanCarrierDispatcher, VulkanDispatchConfig  # noqa: E402
 import workloads  # noqa: E402
@@ -385,7 +385,7 @@ def bench_kernel_dense_vulkan(
 
     dispatcher: Optional[VulkanCarrierDispatcher] = None
     shader = Path(shader)
-    spv_path = Path(spv) if spv else shader.with_suffix(".spv")
+    spv_path = Path(spv) if spv else resolve_spv(shader.stem)
 
     if not cpu_only:
         try:
@@ -565,7 +565,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p.add_argument("--workload", type=str, default="random_sparse", choices=list(workloads.names()))
     p.add_argument("--threads", type=int, default=None, help="Optional CPU thread cap (sets OMP/BLAS env + numpy.set_num_threads when available).")
     # Vulkan options
-    p.add_argument("--shader", type=Path, default=ROOT / "gpu_shaders" / "sign_flip.comp")
+    p.add_argument("--shader", type=Path, default=resolve_shader("sign_flip"))
     p.add_argument("--spv", type=Path, default=None, help="Optional SPIR-V output path; defaults beside shader.")
     p.add_argument("--device-index", type=int, default=0)
     p.add_argument("--batches", type=int, nargs="+", default=[1], help="Repeat kernel N times per timing (amortize dispatch).")

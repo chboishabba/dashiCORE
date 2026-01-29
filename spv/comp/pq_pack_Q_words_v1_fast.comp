@@ -1,0 +1,82 @@
+#version 450
+
+// Computes rank as:
+// rank = popcount(P_words[start_word .. word-1]) + popcount(P_words[word] & ((1<<bit)-1))
+// Complexity per supported site: O(words_per_block), not O(B_sites)
+layout(local_size_x = 256) in;
+
+
+// Fast PQ v1 Q-packing.
+// - Reads P_words (support bitset)
+// - Reads sgn_u32 (raw sign bits per site)
+// - Writes Q_words via atomicOr
+
+
+layout(std430, set=0, binding=0) readonly buffer P  { uint P_words[]; };
+layout(std430, set=0, binding=1) readonly buffer SG { uint sgn_u32[]; };
+layout(std430, set=0, binding=2) readonly buffer QB { uint Q_block_base[]; }; // bits, len n_blocks+1
+layout(std430, set=0, binding=3) writeonly buffer Q { uint Q_words[]; };
+
+layout(push_constant) uniform PC {
+    uint n;             // total sites
+    uint B_sites;       // sites per block (must be multiple of 32)
+    uint n_blocks;      // ceil(n / B_sites)
+    uint n_p_words;     // ceil(n / 32)
+    uint n_q_words;     // ceil(total_support / 32)
+} pc;
+
+/* Read support bit */
+bool get_P(uint i) {
+    uint w = i >> 5;
+    uint b = i & 31u;
+    if (w >= pc.n_p_words) return false;
+    return ((P_words[w] >> b) & 1u) != 0u;
+}
+
+/* Compute rank within block [block_start, i) */
+uint rank_in_block(uint block_start, uint i) {
+    uint start_word = block_start >> 5;
+    uint word       = i >> 5;
+    uint bit        = i & 31u;
+
+    uint r = 0u;
+
+    // full words strictly before i
+    for (uint w = start_word; w < word; w++) {
+        if (w < pc.n_p_words)
+            r += uint(bitCount(P_words[w]));
+    }
+
+    // partial word
+    if (word < pc.n_p_words && bit != 0u) {
+        uint mask = (1u << bit) - 1u;
+        r += uint(bitCount(P_words[word] & mask));
+    }
+
+    return r;
+}
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= pc.n) return;
+
+    // skip zero-support sites early
+    if (!get_P(i)) return;
+
+    uint b = i / pc.B_sites;
+    if (b >= pc.n_blocks) return;
+
+    uint block_start = b * pc.B_sites;
+    uint r = rank_in_block(block_start, i);
+
+    uint q_bit = Q_block_base[b] + r;
+    uint qw = q_bit >> 5;
+    uint qb = q_bit & 31u;
+
+    if (qw >= pc.n_q_words) return;
+
+    // sign bit convention: sgn_u32[i] == 1 => +1
+    if (sgn_u32[i] != 0u) {
+        atomicOr(Q_words[qw], (1u << qb));
+    }
+}

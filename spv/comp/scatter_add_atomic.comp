@@ -1,0 +1,21 @@
+#version 450
+#extension GL_EXT_shader_atomic_float : require
+layout(local_size_x = 256) in;
+
+/*
+SCATTER_ADD (atomic)
+dst[idx[i]] += src[i]
+NOTE: FP atomic add is order-dependent; results may vary slightly.
+*/
+
+layout(std430, set=0, binding=0) readonly buffer SRC { float src[]; };
+layout(std430, set=0, binding=1) readonly buffer IDX { uint idx[]; };
+layout(std430, set=0, binding=2) buffer DST { float dst[]; };
+
+layout(push_constant) uniform PC { uint n; } pc;
+
+void main() {
+  uint i = gl_GlobalInvocationID.x;
+  if (i >= pc.n) return;
+  atomicAdd(dst[idx[i]], src[i]);
+}

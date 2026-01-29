@@ -1,0 +1,32 @@
+#version 450
+layout(local_size_x = 256) in;
+
+layout(std430, set=0, binding=0) readonly buffer SM { uint support_words[]; };
+layout(std430, set=0, binding=1) writeonly buffer P { uint partial_counts[]; };
+
+layout(push_constant) uniform PC {
+    uint n_words; // number of uint32 words in mask
+} pc;
+
+shared uint sh[256];
+
+uint popcount32(uint v) { return bitCount(v); }
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    uint lid = gl_LocalInvocationID.x;
+
+    uint v = 0u;
+    if (gid < pc.n_words) v = popcount32(support_words[gid]);
+    sh[lid] = v;
+    barrier();
+
+    for (uint stride = 128; stride > 0; stride >>= 1) {
+        if (lid < stride) sh[lid] += sh[lid + stride];
+        barrier();
+    }
+
+    if (lid == 0) {
+        partial_counts[gl_WorkGroupID.x] = sh[0];
+    }
+}

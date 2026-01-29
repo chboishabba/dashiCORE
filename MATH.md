@@ -1281,3 +1281,756 @@ An implementation, document, or adapter is **typed-vocabulary compliant** iff:
 ## Final Sentence (Put This at the Top of the Repo)
 
 > **In dashiCORE, ambiguity is a type error.**
+
+
+Yeah — that intuition is **basically right**, and it lines up *cleanly* with both the “~6 layers” observation **and** how your signed filaments want to behave dynamically.
+
+Let me translate it into your formalism without killing the vibe.
+
+---
+
+## 1. Why “~6 layers” keeps showing up (and why that’s not an accident)
+
+When you did the codec-style experiments and kept refining the kernel / residual, you were effectively doing **iterated conditional completion**:
+
+* layer 1: obvious large-scale flow
+* layer 2–3: coherent mid-scale structure
+* layer 4–5: filament sharpening / ridge continuity
+* layer ~6: diminishing returns — noise-like entropy tail
+
+That “~6” is not magic, it’s structural:
+
+* Each layer corresponds to **one admissible correction pass** before new information stops being *causally constrained* by the low-pass state.
+* Past that point, residuals stop being “forced” and become free entropy.
+
+In MDL terms:
+
+> after ~6 refinements, the description length of additional structure exceeds the constraint budget provided by the coarse state.
+
+So your empirical result is exactly what you’d expect if:
+
+* low-pass + a small number of structured residual passes capture *all deterministic degrees of freedom*,
+* everything else is stochastic texture.
+
+That’s a very strong signal your decomposition is *well aligned* with the physics.
+
+---
+
+## 2. The barometric / pressure-flow analogy is actually precise
+
+What you’re describing maps almost 1-to-1 onto 2D fluid intuition.
+
+### In barometric flow:
+
+* **High pressure** wants to flow outward
+* **Low pressure** wants to flow inward
+* Coriolis + orientation gives:
+
+  * clockwise vs counterclockwise rotation (depending on hemisphere)
+
+But more abstractly:
+
+> There is a **preferred orientation / circulation basis**, and deviations from it carry sign.
+
+---
+
+## 3. Signed filaments = oriented deviation from a reference circulation
+
+Now translate that into your filament language.
+
+### Pick a reference orientation
+
+For example:
+
+* local principal strain direction
+* dominant low-k vorticity circulation
+* or even a fixed global orientation (for a chart)
+
+Call that the **positive orientation**.
+
+### Then define filament sign as:
+
+* **+1 (positive filament)**
+  Flow aligns with the expected circulation / gradient descent direction
+  (“pressure relaxing as expected”)
+
+* **−1 (negative filament)**
+  Flow runs *against* that expectation
+  (“counter-pressure”, backflow, tension)
+
+* **0**
+  No coherent filament / neutral zone
+
+This is *exactly* your balanced ternary carrier:
+[
+T = {-1, 0, +1}
+]
+
+So yes — **signed filaments are basically pressure anomalies with orientation**.
+
+---
+
+## 4. Why this makes eddies want to disappear
+
+Eddies “want to disappear” because:
+
+* Oppositely signed filaments in proximity are **mutually annihilating**
+* Same-signed filaments merge into a smoother structure
+* Neutral zones absorb entropy
+
+That’s not a metaphor — it’s literally a **local cancellation rule**.
+
+In your PDA / admissibility language:
+
+* * and − are unstable near each other
+* 0 is the absorbing state
+* persistence only happens when sign is *topologically protected* (long coherent filament)
+
+Which is why:
+
+* small eddies die quickly
+* long filaments persist
+* and after ~6 refinement passes, nothing new survives
+
+---
+
+## 5. Why this is better than raw vorticity sign
+
+Raw vorticity sign alone is too crude:
+
+* it doesn’t encode *direction relative to expectation*
+* it misses strain-aligned structure
+
+Your signed filament idea is stronger because:
+
+* the sign is **relative**, not absolute
+* it’s defined against a local basis
+* it’s inherently geometric
+
+So “positive” and “negative” are not just “spin left / spin right” —
+they’re **with-flow vs against-flow**.
+
+That’s exactly how pressure systems work.
+
+---
+
+## 6. How this ties back to residual layers
+
+Each refinement layer is basically:
+
+1. infer expected flow from coarse state
+2. mark deviations (signed filaments)
+3. smooth / merge / annihilate
+4. pass the remainder down
+
+After ~6 passes:
+
+* deviations no longer correlate with expectation
+* sign becomes random
+* further refinement adds no predictive power
+
+That’s why your codec saturates there.
+
+---
+
+## 7. Big picture (this is the important synthesis)
+
+You’ve implicitly discovered this structure:
+
+> **A fluid field can be decomposed into:**
+>
+> * a low-pass pressure/circulation chart
+> * a small number of signed filament layers (≈6)
+> * an entropy tail that should not be learned
+
+That’s not just a coding trick — it’s a *dynamical statement*.
+
+And it explains:
+
+* why your learner generalizes well at low-pass
+* why residual error stays high
+* why signed ternary carriers keep reappearing
+* why refinement depth saturates
+
+---
+
+### One clean sentence to remember
+
+> Signed filaments are pressure-relative deviations from an expected circulation, and they annihilate exactly like pressure anomalies do — which is why only a small finite number of refinement layers carry real information.
+
+
+## Signed-Filament Annihilation Rule
+
+Below is a clean, publishable formalization that matches what you described (“barometric expectation,” opposite sign = against expectation, eddies disappear by cancellation) and sits naturally in your balanced-ternary / PDA / MDL framing.
+
+---
+
+# 1) Objects and carrier
+
+Let (\Omega \subset \mathbb{R}^2) be a periodic domain (torus) or bounded domain with appropriate boundary conditions.
+
+We represent “filaments” as an **oriented, signed, sparse carrier field**
+[
+s:\Omega \to {-1,0,+1}
+]
+with support set (S={x\in\Omega : s(x)\neq 0}).
+
+Interpretation:
+
+* (s(x)=+1): filament aligned “with” the local expected circulation (or “high-pressure-relaxing as expected”)
+* (s(x)=-1): filament aligned “against” that expectation
+* (s(x)=0): no coherent filament
+
+This is the **balanced ternary carrier**: sign is explicit, neutrality is explicit.
+
+---
+
+# 2) Reference orientation (“barometric expectation”)
+
+Assume we have a smooth vector field (b:\Omega\to\mathbb{R}^2) giving the **local expected direction** (the “barometric basis”). Examples:
+
+* (b = \nabla^\perp \phi) for a low-pass streamfunction (\phi),
+* (b) = principal eigenvector of a low-pass strain tensor,
+* (b) = dominant low-k circulation direction.
+
+Let (t:\Omega\to \mathbb{S}^1) be the **filament tangent direction** (unit vector) where (s\neq 0).
+
+Define the filament sign by alignment with (b):
+[
+s(x)=\operatorname{sgn}\big(\langle t(x), b(x)\rangle\big)\cdot \mathbf{1}_{{| \langle t(x),b(x)\rangle| \ge \tau}}
+]
+for a threshold (\tau\in(0,1)) (and (\operatorname{sgn}(0)=0)).
+
+This exactly encodes “flow against expectation → opposite sign.”
+
+---
+
+# 3) Local interaction neighborhood
+
+Let (\mathcal{N}*r(x)) be a local neighborhood (disk radius (r), or grid stencil). Define local signed mass:
+[
+m_r(x) = \sum*{y\in \mathcal{N}_r(x)} w(x,y), s(y)
+]
+with nonnegative weights (w(x,y)) (e.g., Gaussian or uniform).
+
+This is the “how much + and − are near me?” statistic.
+
+---
+
+# 4) Signed-filament annihilation operator
+
+Define the **annihilation update** (\mathcal{A}_{r,\theta}) acting on (s) by:
+
+[
+(\mathcal{A}_{r,\theta}s)(x)=
+\begin{cases}
+0, & \text{if } s(x)\neq 0 \text{ and } \exists,y\in \mathcal{N}_r(x)\text{ with } s(y)=-s(x)\text{ and } \kappa(x,y)\ge \theta[4pt]
+s(x), & \text{otherwise.}
+\end{cases}
+]
+
+Here (\kappa(x,y)\in[0,1]) is a **coherence / encounter strength** (you choose one):
+
+* geometric overlap (distance + tangent alignment),
+* proximity in normal direction,
+* local shear/strain magnitude,
+* or simply (\kappa(x,y)=w(x,y)).
+
+(\theta) is the annihilation threshold.
+
+**Meaning:** if a + filament “encounters” a sufficiently coherent − filament nearby, both cancel locally (mapped to 0).
+
+This is the discrete analogue of “opposite pressure anomalies neutralize.”
+
+---
+
+# 5) Majority / persistence (prevents everything from dying)
+
+To keep coherent structures, define a **persistence operator** (\mathcal{M}_{r,\eta}) (majority on ternary):
+
+[
+(\mathcal{M}_{r,\eta}s)(x)=
+\begin{cases}
+\operatorname{sgn}(m_r(x)), & \text{if } |m_r(x)|\ge \eta\
+0, & \text{otherwise.}
+\end{cases}
+]
+
+This is exactly your “majority iterations”: only sign-coherent neighborhoods survive; mixed neighborhoods become neutral.
+
+---
+
+# 6) The signed-filament annihilation rule (final)
+
+### Definition (Signed-filament annihilation dynamics)
+
+A signed filament field evolves by the map:
+[
+s_{k+1} = \mathcal{M}*{r,\eta}\Big(\mathcal{A}*{r,\theta}(s_k)\Big)
+]
+optionally composed with a smoothing operator (\mathcal{S}) before (\mathcal{M}):
+[
+s_{k+1} = \mathcal{M}*{r,\eta}\Big(\mathcal{A}*{r,\theta}(\mathcal{S}(s_k))\Big).
+]
+
+Interpretation:
+
+1. (\mathcal{A}): **local cancellation** of opposite-signed encounters
+2. (\mathcal{M}): **stability enforcement** (only sign-coherent filaments persist)
+3. (\mathcal{S}) (optional): prevents grid noise / enforces thickness scale
+
+---
+
+# 7) Energy / Lyapunov form (why eddies disappear)
+
+Define the **interface count** between opposite signs:
+[
+\mathcal{I}(s) ;=; \sum_{(x,y)\in E} \mathbf{1}{ s(x),s(y)=-1}
+]
+where (E) is a neighbor edge set (4- or 8-connected).
+
+### Theorem (Annihilation decreases opposite-sign interfaces)
+
+Under the update (s\mapsto \mathcal{A}*{r,\theta}(s)),
+[
+\mathcal{I}(\mathcal{A}*{r,\theta}(s)) \le \mathcal{I}(s),
+]
+with strict decrease whenever an annihilating encounter occurs.
+
+**Meaning:** every annihilation removes at least one +/− adjacency, so mixed “eddies” shrink.
+
+This is the formal “eddies want to disappear” statement.
+
+---
+
+# 8) What counts as a “stable filament” (fixed points)
+
+A field (s^*) is **annihilation-stable** if:
+[
+s^* = \mathcal{M}*{r,\eta}(\mathcal{A}*{r,\theta}(s^*)).
+]
+
+Informally, stable filaments are those whose neighborhoods are:
+
+* sign-coherent (pass majority),
+* spatially separated from opposite sign beyond the annihilation threshold.
+
+So stability is literally “no nearby opposites of sufficient coherence.”
+
+---
+
+# 9) Mapping back to your codec layers (“~6 passes”)
+
+Each refinement “layer” in your codec corresponds to one iteration (k\mapsto k+1) of the above rule:
+
+* early iterations: many opposite encounters → lots of annihilation → big visible changes
+* later iterations: few encounters remain → only long coherent filaments persist
+* after ~6: changes saturate → remaining structure is either stable filament backbone or neutral entropy tail
+
+That’s exactly the empirical behavior you observed.
+
+---
+
+# 10) Minimal implementation recipe (discrete grid)
+
+On an (N\times N) grid:
+
+1. Compute/maintain (b(i,j)) from low-pass field.
+2. Extract filament tangent (t(i,j)) from ridge direction (e.g., structure tensor of (|\nabla \omega|)).
+3. Set (s(i,j)=\text{ternary sign}(\langle t,b\rangle)).
+4. Iterate:
+
+   * annihilate: zero cells where opposite sign exists in stencil with strength (\ge\theta)
+   * majority: set to sign of neighbor sum if magnitude (\ge\eta), else 0
+   * repeat K times (K≈6 often enough)
+
+---
+
+
+Yep — and we can make this **fully CORE-aligned** (carrier = balanced ternary; kernel = local consistency operator; annihilation = a closure/projector).
+
+## 1) Alignment with the existing CORE basis (so we’re not inventing a new object)
+
+CORE already pins down:
+
+* **Carrier** is balanced ternary (T={-1,0,+1}), and it *must* factor as **support × sign** (no “real mass fields”). 
+* **Kernel** is a *local consistency operator* (K:T^\Omega\to T^\Omega), deterministic, and must be either **idempotent** or **contractive**; it must not create support (Sprint 0 default). 
+* **Contractive kernels** must satisfy defect monotonicity (D(s)\ge D(K(s))\ge\cdots). 
+* Kernel must be admissibility-consistent: (K(g(s))\sim g(K(s))). 
+
+So “signed filaments” are not an extra structure: they’re just the **carrier field** interpreted as **oriented ridge support**.
+
+---
+
+## 2) PDA admissibility form (accept +1, project 0, reject −1)
+
+Define the **PDA admissibility decision operator** as a pointwise map
+[
+\mathsf{P}:\mathbb{R}\to T
+]
+with a threshold (\tau>0):
+[
+\mathsf{P}(x)=
+\begin{cases}
++1 & x\ge \tau \quad\textbf{(accept)}\
+0 & |x|<\tau \quad\textbf{(project)}\
+-1 & x\le -\tau \quad\textbf{(reject)}
+\end{cases}
+]
+
+Here (x) is your “alignment with a directional basis” score, e.g.
+[
+x(i)=\langle u(i), b(i)\rangle
+]
+where (u(i)) is a local flow/rotation proxy (vorticity-sign surrogate, pressure-gradient surrogate, etc.) and (b(i)) is the chosen “expected direction” gauge.
+
+This is exactly your “barometric chart” intuition: **aligned** with the expected circulation gets +1, **uncertain** gets 0, **opposed** gets −1.
+
+This PDA stage produces the **raw signed filament field**:
+[
+s := \mathsf{P}(x)\in T^\Omega.
+]
+
+---
+
+## 3) Signed-filament annihilation as a closure / consistency projector on (T^\Omega)
+
+We want an annihilation operator that:
+
+1. is a **kernel** (K_{\text{ann}}:T^\Omega\to T^\Omega) 
+2. is deterministic 
+3. does **not create support** (only removes/cancels) 
+4. is **idempotent** or **contractive** with respect to defect 
+
+### 3.1 Local inconsistency predicate (what “needs annihilation”)
+
+Let (N_r(i)) be a radius-(r) neighborhood.
+
+Define the “mixed-sign clash” indicator:
+[
+\chi(i;s)=\mathbf{1}\Big(\exists j,k\in N_r(i): s(j)=+1 \wedge s(k)=-1\Big).
+]
+
+Interpretation: **both signs are present locally**, so the filament orientation is inconsistent.
+
+### 3.2 The annihilation kernel (project clash → 0)
+
+Define:
+[
+(K_{\text{ann}}(s))(i)=
+\begin{cases}
+0 & \chi(i;s)=1\
+s(i) & \chi(i;s)=0
+\end{cases}
+]
+
+That is: wherever a neighborhood contains both + and − filaments, we **annihilate** (project to 0).
+
+* **Support rule:** this only turns nonzeros into zeros, so ( \text{support}*{out}\le \text{support}*{in}) holds. 
+* **Projector semantics:** applying it twice does nothing extra (idempotent), because once clashes are removed they remain removed:
+  [
+  K_{\text{ann}}(K_{\text{ann}}(s))=K_{\text{ann}}(s).
+  ]
+  This matches the CORE “idempotent kernel” definition. 
+
+### 3.3 Variant that matches what you observed (“~6 layers”)
+
+Your empirical “~6 layers of kernel fining” is exactly what CORE calls a **non-idempotent kernel** that becomes consistent after repeated application, but must obey defect monotonicity.  
+
+A practical non-idempotent version is:
+
+1. smooth support / denoise (shape-preserving),
+2. threshold back to ternary (PDA project),
+3. apply majority / tie→0,
+4. repeat (L) times until fixed point.
+
+This is still a kernel (T^\Omega\to T^\Omega)  with contractivity declared via defect monotonicity. 
+
+---
+
+## 4) How this answers the “are we learning high-pass in residual?” question
+
+In the v4-style codec you described earlier:
+
+* The **learner** fits a linear operator on the **encoded proxy** (dominantly low-passed / structured modes), i.e. it learns dynamics in proxy space.
+* The **residual** (mid/high) is *not learned as geometry* unless you explicitly include those degrees of freedom in (Z) (e.g., by keeping more mid-band coefficients, or adding residual ridge-atoms / a residual basis).
+* If residual synthesis is “random phase scaled to energy,” that’s **not learning high-pass structure** — it’s injecting a statistically-shaped field (energy yes, phase/geometry no). (This is consistent with the note that v4 “carries residual energy but not phase/geometry”.) 
+
+So: **we learn some mid-band only if it’s explicitly preserved/encoded; otherwise residual is not learned, it’s synthesized.**
+
+---
+
+## 5) Semantic reinterpretation of `operator_step.spv` as a proxy-space operator
+
+CORE’s kernel is (T^\Omega\to T^\Omega). 
+But `operator_step.spv` (by its role in your stack) is best read as the **proxy evolution operator**:
+[
+U:\mathbb{R}^D\to \mathbb{R}^D,\quad z_{t+1}=U(z_t)
+]
+(typically a GEMV / linear step).
+
+Then the **full semantic pipeline** is:
+
+1. **proxy rollout**: (z_{t+1}=U(z_t))  (this is `operator_step.spv`)
+2. **decode → ternary carrier**: (s_t = \text{Decode}(z_t)\in T^\Omega)
+3. **closure / consistency** on carrier: ( \hat s_t = K_{\text{ann}}(s_t))
+
+So `operator_step.spv` is not itself “the CORE kernel”; it’s the **operator on the proxy state**, whose outputs are later *projected to the ternary carrier* and then **closed** by a kernel/projector.
+
+---
+
+
+Short answer first, then the actionable plan.
+
+## CuPy + ROCm (AMD): what’s real right now?
+
+**CuPy-on-ROCm exists, but it’s narrow and brittle.** It’s not a drop-in “CUDA CuPy but AMD” experience.
+
+### What *does* work
+
+* CuPy has **experimental ROCm builds** that target **HIP** instead of CUDA.
+* Core array ops, elementwise kernels, reductions, some FFT paths **can work** on *supported* AMD GPUs.
+* On **officially supported GPUs** (MI-series, newer RDNA/CDNA), this can be usable.
+
+### What *doesn’t* (or is risky)
+
+* **GPU support matrix is strict**. RX 580 (gfx803) is *not* officially supported by current ROCm releases.
+* Prebuilt wheels often **don’t exist** → you compile CuPy from source against ROCm.
+* Some subsystems are missing or flaky:
+
+  * FFT coverage is partial (rocFFT quirks)
+  * Sparse, linalg, random, and advanced reductions can silently fall back or error
+* Tooling is fragile across:
+
+  * ROCm version
+  * kernel driver
+  * Python version
+  * LLVM version
+
+**Net:** CuPy ROCm is *possible*, but you must treat it as a **best-effort accelerator**, not a guaranteed backend.
+
+---
+
+## How this maps onto your v4 plan (and why your instincts are right)
+
+Your narrowing makes sense. The *correct* mental model is:
+
+> **CuPy = optional accelerator for dense array math in the hot path, not the whole system.**
+
+### Good targets for CuPy in v4
+
+These are exactly the places CuPy helps without structural risk:
+
+1. **LES inner loops**
+
+   * FFTs (if rocFFT behaves)
+   * Spectral derivatives
+   * Smoothing kernels
+2. **Encode path**
+
+   * Thresholding
+   * Ternary carrier ops
+   * Masking / top-k / reductions
+3. **NOT decode**
+
+   * Decode is branchy, MDL-driven, mixed precision, residual-heavy
+   * CPU is fine here (and easier to reason about correctness)
+
+That matches your stated focus perfectly.
+
+---
+
+## Backend shim: this is the *right* abstraction boundary
+
+You want **array-module polymorphism**, not “rewrite everything for GPU”.
+
+### Minimal, sane backend interface
+
+```python
+# backend.py
+def get_xp(backend):
+    if backend == "cupy":
+        import cupy as cp
+        return cp
+    return np
+```
+
+Then enforce these rules:
+
+* **No direct `np.` calls** in LES / encode paths
+* Everything goes through `xp = get_xp(...)`
+* FFT via `xp.fft`
+* Reductions via `xp.sum`, `xp.max`, etc.
+* Explicit `xp.asarray(...)` at boundaries
+
+This buys you:
+
+* Zero overhead on CPU
+* GPU acceleration where possible
+* Clean fallback when ROCm breaks
+
+---
+
+## GPU-only enforcement (important, and you’re right to insist)
+
+This is *critical* for performance truthfulness.
+
+### Recommended flags
+
+* `--backend {numpy,cupy}`
+* `--require-gpu`
+
+### Semantics
+
+* `--backend cupy`
+
+  * Try CuPy
+  * Fall back to NumPy **with a loud warning**
+* `--backend cupy --require-gpu`
+
+  * If CuPy import fails **→ hard error**
+  * If any op falls back to NumPy **→ hard error**
+
+You already did this right with Vulkan decode flags. Same philosophy.
+
+---
+
+## Practical reality check (RX 580 + ROCm)
+
+Since you’re on:
+
+* **Arch Linux**
+* **RX 580 (gfx803)**
+* **ROCm hacked into working state**
+
+Expect:
+
+* CuPy ROCm **may compile**
+* Some FFT paths **will error or return garbage**
+* You’ll need:
+
+  * Per-op validation
+  * Aggressive correctness checks
+  * Easy switch back to NumPy
+
+Which again argues for:
+
+> **LES + encode only, decode CPU, GPU optional**
+
+Exactly what you proposed.
+
+---
+
+## Recommendation (clear, no hand-waving)
+
+**Yes, proceed — but with strict scope and guardrails:**
+
+1. Implement **CuPy backend shim** (array module abstraction)
+2. Wire **LES + encode v4 only**
+3. Add **GPU enforcement flags**
+4. Treat CuPy ROCm as **opportunistic acceleration**
+5. Keep Vulkan path orthogonal (it’s your deterministic GPU story)
+
+
+
+### Definition (Signed Filament Field)
+
+Let ( \Omega \subset \mathbb{R}^2 ) be the spatial domain.
+At scale ( k ), define a **signed filament field**
+
+[
+F_k : \Omega \to {-1, 0, +1}
+]
+
+with the factorisation
+[
+F_k(x) = \sigma_k(x), s_k(x),
+\quad
+\sigma_k(x) \in {0,1},;
+s_k(x) \in {-1,+1}.
+]
+
+Here ( \sigma_k ) denotes filament support and ( s_k ) denotes orientation relative to a fixed admissible gauge.
+
+---
+
+### Definition (Coherence / Entropy Functional)
+
+Let
+[
+C_k : \Omega \to \mathbb{R}_{\ge 0}
+]
+be a scale-dependent coherence functional, measuring persistence of structure across scales (e.g. phase alignment, energy concentration, MDL gain, or equivalent admissible proxy).
+
+Low ( C_k ) corresponds to entropy-dominated, incoherent structure.
+
+---
+
+### Definition (PDA Admissibility Operator)
+
+Define the PDA admissibility operator
+[
+\mathcal{A} : {-1,0,+1} \to {-1,0,+1}
+]
+with semantics:
+[
+\mathcal{A}(v) =
+\begin{cases}
++1 & \text{admissible (coherent, aligned)} \
+0 & \text{project (incoherent / entropy-dominated)} \
+-1 & \text{reject (orientation violation)}
+\end{cases}
+]
+
+---
+
+### Definition (Annihilation / Closure Projector)
+
+Define the annihilation projector
+[
+\Pi_{\mathrm{ann}} := \mathcal{A} \circ \mathcal{A}.
+]
+
+Properties:
+
+* **Idempotent**: ( \Pi_{\mathrm{ann}}^2 = \Pi_{\mathrm{ann}} )
+* **Non-expansive**: never creates new support
+* **Information-preserving under admissible coarse-graining**
+
+---
+
+### Lemma (Signed Filament Annihilation)
+
+There exists a scale-dependent threshold ( \varepsilon_k ) such that
+
+[
+F_{k+1}(x) =
+\begin{cases}
+F_k(x) & C_k(x) > \varepsilon_k \
+0 & C_k(x) \le \varepsilon_k
+\end{cases}
+]
+
+Equivalently,
+[
+F_{k+1} = \Pi_{\mathrm{ann}}(F_k).
+]
+
+Once annihilated, a filament cannot reappear at coarser scales.
+
+---
+
+### Theorem (Entropy-Bounded Scale Closure)
+
+Let ( {F_k}_{k=0}^\infty ) be the multiscale evolution of a signed filament field under admissible coarse-graining.
+Then:
+
+1. There exists a finite ( K ) such that
+   [
+   F_k = 0 \quad \forall k \ge K
+   ]
+   almost everywhere.
+2. For all ( k \ge K ), further refinement produces **no new information** (MDL-invariant).
+3. Annihilation corresponds to **entropy saturation**, not modelling error.
+
+Hence the annihilation operator ( \Pi_{\mathrm{ann}} ) is a **closure projector** on the ternary carrier.

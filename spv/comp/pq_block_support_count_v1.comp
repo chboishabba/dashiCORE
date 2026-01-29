@@ -1,0 +1,29 @@
+#version 450
+layout(local_size_x = 256) in;
+
+layout(std430, set=0, binding=0) readonly buffer P { uint P_words[]; };
+layout(std430, set=0, binding=1) writeonly buffer BC { uint block_count[]; };
+
+layout(push_constant) uniform PC {
+    uint n;              // sites
+    uint B_sites;        // sites per block (e.g., 2048)
+    uint n_blocks;       // = ceil(n / B_sites)
+    uint n_p_words;      // = ceil(n / 32)
+} pc;
+
+void main() {
+    uint b = gl_GlobalInvocationID.x;
+    if (b >= pc.n_blocks) return;
+
+    uint start_site = b * pc.B_sites;
+    uint end_site   = min(pc.n, start_site + pc.B_sites);
+
+    uint w0 = start_site >> 5;                // /32
+    uint w1 = (end_site + 31u) >> 5;          // ceil(end/32)
+
+    uint acc = 0u;
+    for (uint w = w0; w < w1; w++) {
+        if (w < pc.n_p_words) acc += uint(bitCount(P_words[w]));
+    }
+    block_count[b] = acc;
+}

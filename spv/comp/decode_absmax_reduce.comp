@@ -1,0 +1,48 @@
+#version 450
+
+// Per-workgroup reduction of |omega_lp - base| max.
+// Writes one value per workgroup into partial_max buffer.
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer OmegaBuf {
+    float data[];
+} omega_buf;
+
+layout(std430, set = 0, binding = 1) readonly buffer BaseBuf {
+    float data[];
+} base_buf;
+
+layout(std430, set = 0, binding = 2) buffer MaxBuf {
+    float data[];
+} max_buf;
+
+layout(push_constant) uniform PushConsts {
+    uint total;
+} pc;
+
+shared float shm[256];
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    uint lid = gl_LocalInvocationID.x;
+    float v = 0.0;
+    if (gid < pc.total) {
+        float diff = omega_buf.data[gid] - base_buf.data[gid];
+        v = abs(diff);
+    }
+    shm[lid] = v;
+    barrier();
+
+    // Reduce within workgroup.
+    for (uint offset = gl_WorkGroupSize.x / 2u; offset > 0u; offset >>= 1u) {
+        if (lid < offset) {
+            shm[lid] = max(shm[lid], shm[lid + offset]);
+        }
+        barrier();
+    }
+
+    if (lid == 0u) {
+        max_buf.data[gl_WorkGroupID.x] = shm[0];
+    }
+}

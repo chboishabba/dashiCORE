@@ -1,0 +1,50 @@
+#version 450
+layout(local_size_x = 256) in;
+
+/*
+BLOCK_SPARSE_GEMV:
+A stored as CSR of BxB blocks.
+For each scalar row i:
+  y[i] = sum over blocks in row-block rb:
+           sum over bj: A_block[bi,bj] * x[col_block*B + bj]
+Deterministic: fixed loop order.
+*/
+
+layout(std430, set=0, binding=0) readonly buffer BRP { uint block_row_ptr[]; }; // len n_block_rows+1
+layout(std430, set=0, binding=1) readonly buffer BCI { uint block_col_idx[]; }; // len n_blocks_nnz
+layout(std430, set=0, binding=2) readonly buffer BV  { float block_vals[]; };   // len n_blocks_nnz * (B*B)
+layout(std430, set=0, binding=3) readonly buffer X   { float x[]; };            // len n_cols
+layout(std430, set=0, binding=4) writeonly buffer Y  { float y[]; };            // len n_rows
+
+layout(push_constant) uniform PC {
+  uint n_rows;        // scalar rows
+  uint B;             // block size (e.g. 8)
+  uint n_block_rows;  // = ceil(n_rows/B)
+} pc;
+
+void main() {
+  uint i = gl_GlobalInvocationID.x;
+  if (i >= pc.n_rows) return;
+
+  uint rb = i / pc.B;          // row-block
+  uint ri = i - rb * pc.B;     // row inside block
+
+  uint s = block_row_ptr[rb];
+  uint e = block_row_ptr[rb + 1u];
+
+  float acc = 0.0;
+
+  for (uint k = s; k < e; k++) {
+    uint cb = block_col_idx[k];                 // col-block index
+    uint base = k * (pc.B * pc.B);              // block start in block_vals
+
+    // dot of block row ri with x segment in cb
+    uint x_base = cb * pc.B;
+    for (uint cj = 0u; cj < pc.B; cj++) {
+      float aij = block_vals[base + ri * pc.B + cj];
+      acc += aij * x[x_base + cj];
+    }
+  }
+
+  y[i] = acc;
+}

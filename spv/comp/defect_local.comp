@@ -1,0 +1,18 @@
+#version 450
+layout(local_size_x = 256) in;
+
+layout(std430, set=0, binding=0) readonly buffer In  { float s_in[];  };
+layout(std430, set=0, binding=1) readonly buffer Out { float s_out[]; };
+layout(std430, set=0, binding=2) writeonly buffer D  { float d_local[]; };
+
+layout(push_constant) uniform PC {
+    uint n;
+} pc;
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= pc.n) return;
+    float a = s_in[i];
+    float b = s_out[i];
+    d_local[i] = abs(b - a);
+}

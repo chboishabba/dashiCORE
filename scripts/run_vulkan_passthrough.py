@@ -2,7 +2,8 @@
 Minimal Vulkan backend smoke test for dashiCORE on a RADV/RX 580 setup.
 
 Steps performed:
-1) Compiles (or reuses) gpu_shaders/carrier_passthrough.comp → .spv via glslc.
+1) Compiles (or reuses) spv/comp/carrier_passthrough.comp → spv/carrier_passthrough.spv
+   (falls back to gpu_shaders if missing).
 2) Registers the Vulkan backend with a real compute dispatcher (no CPU fallback).
 3) Runs the passthrough kernel against a sample Carrier and prints the result.
 
@@ -27,13 +28,14 @@ if str(ROOT) not in sys.path:
 
 from dashi_core.backend import use_backend
 from dashi_core.carrier import Carrier
+from gpu_common_methods import resolve_shader, resolve_spv
 from gpu_vulkan_backend import make_vulkan_kernel, register_vulkan_backend, VulkanKernelConfig
 from gpu_vulkan_dispatcher import VulkanDispatchConfig
 
 
 def main() -> None:
-    shader = Path("gpu_shaders/carrier_passthrough.comp")
-    spv = Path("gpu_shaders/carrier_passthrough.spv")
+    shader = resolve_shader("carrier_passthrough")
+    spv = resolve_spv(shader.stem)
     config = VulkanKernelConfig(
         shader_path=shader,
         spv_path=spv,

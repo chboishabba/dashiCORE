@@ -1,0 +1,45 @@
+#version 450
+layout(local_size_x = 256) in;
+
+/*
+GEMV_TILED:
+y[i] = dot(A_row_i, x)
+A row-major [D*D], x [D], y [D]
+Deterministic: fixed-order summation per i.
+*/
+
+layout(std430, set=0, binding=0) readonly buffer A { float Arow[]; }; // D*D
+layout(std430, set=0, binding=1) readonly buffer X { float x[]; };    // D
+layout(std430, set=0, binding=2) writeonly buffer Y { float y[]; };   // D
+
+layout(push_constant) uniform PC {
+  uint D;
+} pc;
+
+shared float x_tile[256];
+
+void main() {
+  uint i = gl_GlobalInvocationID.x;
+  if (i >= pc.D) return;
+
+  float acc = 0.0;
+
+  // walk x in tiles of 256
+  for (uint base = 0u; base < pc.D; base += 256u) {
+    // load x tile cooperatively
+    uint t = gl_LocalInvocationID.x;
+    uint j = base + t;
+    x_tile[t] = (j < pc.D) ? x[j] : 0.0;
+    barrier();
+
+    // dot partial
+    uint row = i * pc.D + base;
+    uint lim = min(256u, pc.D - base);
+    for (uint k = 0u; k < lim; k++) {
+      acc += Arow[row + k] * x_tile[k];
+    }
+    barrier();
+  }
+
+  y[i] = acc;
+}

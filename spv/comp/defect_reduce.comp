@@ -1,0 +1,32 @@
+#version 450
+layout(local_size_x = 256) in;
+
+layout(std430, set=0, binding=0) readonly buffer D  { float d_local[]; };
+layout(std430, set=0, binding=1) writeonly buffer P { float partials[]; };
+
+layout(push_constant) uniform PC {
+    uint n;
+} pc;
+
+shared float sh[256];
+
+void main() {
+    uint lid = gl_LocalInvocationID.x;
+    uint gid = gl_GlobalInvocationID.x;
+
+    float v = 0.0;
+    if (gid < pc.n) v = d_local[gid];
+    sh[lid] = v;
+    barrier();
+
+    // deterministic tree reduction (fixed order)
+    for (uint stride = 128; stride > 0; stride >>= 1) {
+        if (lid < stride) sh[lid] += sh[lid + stride];
+        barrier();
+    }
+
+    if (lid == 0) {
+        uint group = gl_WorkGroupID.x;
+        partials[group] = sh[0];
+    }
+}

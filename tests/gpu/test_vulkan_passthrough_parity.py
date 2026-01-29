@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 
 from dashi_core.carrier import Carrier
-from gpu_common_methods import compile_shader
+from gpu_common_methods import compile_shader, resolve_shader
 from gpu_vulkan_backend import make_vulkan_kernel, register_vulkan_backend, VulkanKernelConfig
 from gpu_vulkan_dispatcher import VulkanDispatchConfig
 
@@ -21,7 +21,7 @@ def test_vulkan_passthrough_parity(tmp_path: Path):
     except ImportError:
         pytest.skip("python-vulkan not installed")
 
-    shader_src = Path("gpu_shaders/carrier_passthrough.comp")
+    shader_src = resolve_shader("carrier_passthrough")
     spv_out = tmp_path / "carrier_passthrough.spv"
     compile_shader(shader_src, spv_out)
 

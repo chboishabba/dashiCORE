@@ -1,0 +1,28 @@
+#version 450
+layout(local_size_x = 1) in;
+
+/*
+ENCODE_SELECT_TOPK:
+Writes anchor_idx[k] = mid_idx[best_idx] and masks score at best_idx.
+*/
+
+layout(std430, set=0, binding=0) buffer Scores   { float scores[]; };
+layout(std430, set=0, binding=1) readonly buffer MidIdx { uint mid_idx[]; };
+layout(std430, set=0, binding=2) readonly buffer Best   { uvec2 best[]; };
+layout(std430, set=0, binding=3) buffer Anchors  { uint anchor_idx[]; };
+
+layout(push_constant) uniform PC {
+  uint k;
+  uint n;
+} pc;
+
+void main() {
+  if (pc.n == 0) return;
+  uvec2 b = best[0];
+  uint idx = b.x;
+  uint safe_idx = (idx < pc.n) ? idx : 0u;
+  anchor_idx[pc.k] = mid_idx[safe_idx];
+  if (idx < pc.n) {
+    scores[idx] = -3.402823e38;
+  }
+}

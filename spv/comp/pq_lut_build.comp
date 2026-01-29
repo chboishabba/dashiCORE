@@ -1,0 +1,37 @@
+#version 450
+layout(local_size_x = 256) in;
+
+/*
+PQ_LUT_BUILD:
+lut[m*Ks + k] = || q_sub(m) - centroid(m,k) ||^2
+*/
+
+layout(std430, set=0, binding=0) readonly buffer Q { float q[]; };
+layout(std430, set=0, binding=1) readonly buffer C { float centroids[]; };
+layout(std430, set=0, binding=2) writeonly buffer L { float lut[]; };
+
+layout(push_constant) uniform PC {
+  uint M;   // number of subspaces
+  uint Ks;  // centroids per subspace
+  uint Ds;  // dims per subspace
+} pc;
+
+void main() {
+  uint gid = gl_GlobalInvocationID.x;
+  uint total = pc.M * pc.Ks;
+  if (gid >= total) return;
+
+  uint m = gid / pc.Ks;
+  uint k = gid - m * pc.Ks;
+
+  uint q_base = m * pc.Ds;
+  uint c_base = (m * pc.Ks + k) * pc.Ds;
+
+  float acc = 0.0;
+  for (uint d = 0u; d < pc.Ds; d++) {
+    float diff = q[q_base + d] - centroids[c_base + d];
+    acc += diff * diff;
+  }
+
+  lut[m * pc.Ks + k] = acc;
+}

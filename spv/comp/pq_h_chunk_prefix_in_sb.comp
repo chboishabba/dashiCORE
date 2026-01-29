@@ -1,0 +1,22 @@
+#version 450
+layout(local_size_x = 256) in; // one invocation per SB is enough; 256 is harmless
+
+layout(std430, set=0, binding=0) readonly buffer CC { uint chunk_count[]; };
+layout(std430, set=0, binding=1) writeonly buffer CP { uint chunk_prefix[]; }; // [n_sb*n_chunks] in bits
+
+layout(push_constant) uniform PC {
+    uint n_sb;
+    uint n_chunks;
+} pc;
+
+void main() {
+    uint sb = gl_GlobalInvocationID.x;
+    if (sb >= pc.n_sb) return;
+
+    uint base = sb * pc.n_chunks;
+    uint sum = 0u;
+    for (uint c = 0u; c < pc.n_chunks; c++) {
+        chunk_prefix[base + c] = sum; // exclusive
+        sum += chunk_count[base + c];
+    }
+}

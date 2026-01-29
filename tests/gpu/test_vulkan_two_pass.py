@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 
 from dashi_core.carrier import Carrier
-from gpu_common_methods import compile_shader
+from gpu_common_methods import compile_shader, resolve_shader
 from gpu_vulkan_backend import register_vulkan_backend, VulkanKernelConfig
 from gpu_vulkan_dispatcher import VulkanDispatchConfig, build_vulkan_dispatcher
 
@@ -21,8 +21,8 @@ def test_vulkan_two_pass_ordering(tmp_path: Path):
     except ImportError:
         pytest.skip("python-vulkan not installed")
 
-    shader_flip = Path("gpu_shaders/sign_flip.comp")
-    shader_clamp = Path("gpu_shaders/clamp_nonnegative.comp")
+    shader_flip = resolve_shader("sign_flip")
+    shader_clamp = resolve_shader("clamp_nonnegative")
     spv_flip = tmp_path / "sign_flip.spv"
     spv_clamp = tmp_path / "clamp_nonnegative.spv"
     compile_shader(shader_flip, spv_flip)

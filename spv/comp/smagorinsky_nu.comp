@@ -1,0 +1,52 @@
+#version 450
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(std430, set=0, binding=0) readonly buffer UxBuf { float data[]; } ux_buf;
+layout(std430, set=0, binding=1) readonly buffer UyBuf { float data[]; } uy_buf;
+layout(std430, set=0, binding=2) writeonly buffer NuBuf { float data[]; } nu_buf;
+
+layout(push_constant) uniform PC {
+    uint N;
+    float inv_2dx;
+    float Cs;
+    float dx;
+} pc;
+
+void main() {
+    uint x = gl_GlobalInvocationID.x;
+    uint y = gl_GlobalInvocationID.y;
+    if (x >= pc.N || y >= pc.N) {
+        return;
+    }
+    uint N = pc.N;
+    uint xp = (x + 1) % N;
+    uint xm = (x + N - 1) % N;
+    uint yp = (y + 1) % N;
+    uint ym = (y + N - 1) % N;
+
+    uint idx = y * N + x;
+    float ux_xp = ux_buf.data[y * N + xp];
+    float ux_xm = ux_buf.data[y * N + xm];
+    float ux_yp = ux_buf.data[yp * N + x];
+    float ux_ym = ux_buf.data[ym * N + x];
+
+    float uy_xp = uy_buf.data[y * N + xp];
+    float uy_xm = uy_buf.data[y * N + xm];
+    float uy_yp = uy_buf.data[yp * N + x];
+    float uy_ym = uy_buf.data[ym * N + x];
+
+    float dux_dx = (ux_xp - ux_xm) * pc.inv_2dx;
+    float dux_dy = (ux_yp - ux_ym) * pc.inv_2dx;
+    float duy_dx = (uy_xp - uy_xm) * pc.inv_2dx;
+    float duy_dy = (uy_yp - uy_ym) * pc.inv_2dx;
+
+    float s11 = dux_dx;
+    float s22 = duy_dy;
+    float s12 = 0.5 * (dux_dy + duy_dx);
+
+    float s2 = 2.0 * (s11 * s11 + s22 * s22) + 4.0 * s12 * s12;
+    float s = sqrt(max(s2, 0.0));
+    float delta = pc.dx;
+    float nu_t = (pc.Cs * delta) * (pc.Cs * delta) * s;
+    nu_buf.data[idx] = nu_t;
+}

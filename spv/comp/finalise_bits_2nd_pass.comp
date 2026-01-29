@@ -1,0 +1,30 @@
+#version 450
+// This shader assumes support_count is already provided in a 1-element buffer.
+layout(local_size_x = 1) in;
+
+layout(std430, set=0, binding=0) readonly buffer SC { uint support_count_buf[]; }; // [1]
+layout(std430, set=0, binding=1) writeonly buffer OUT { float mdl_out[]; };        // [5] breakdown + total
+
+layout(push_constant) uniform PC {
+    uint n;                // number of sites
+    uint bits_per_code;    // e.g. 8, 10, 12
+    uint residual_bytes;   // bytes in residual stream (0 if none)
+} pc;
+
+void main() {
+    uint k = support_count_buf[0];
+
+    float bits_support = float(pc.n);                  // 1 bit/site
+    float bits_sign    = float(k);                     // 1 bit/supported
+    float bits_code    = float(k) * float(pc.bits_per_code);
+    float bits_resid   = float(pc.residual_bytes) * 8.0;
+
+    float total = bits_support + bits_sign + bits_code + bits_resid;
+
+    // mdl_out layout: [support, sign, code, resid, total]
+    mdl_out[0] = bits_support;
+    mdl_out[1] = bits_sign;
+    mdl_out[2] = bits_code;
+    mdl_out[3] = bits_resid;
+    mdl_out[4] = total;
+}

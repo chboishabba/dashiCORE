@@ -1,0 +1,46 @@
+#version 450
+layout(local_size_x = 256) in;
+
+/*
+REDUCE_MAX_IDX (pass):
+partials[group] = (best_index, best_value_bits) over group range.
+*/
+
+layout(std430, set=0, binding=0) readonly buffer X { float x[]; };
+layout(std430, set=0, binding=1) writeonly buffer P { uvec2 partials[]; };
+
+layout(push_constant) uniform PC {
+  uint n;
+} pc;
+
+shared float sh_val[256];
+shared uint  sh_idx[256];
+
+void main() {
+  uint lid = gl_LocalInvocationID.x;
+  uint gid = gl_GlobalInvocationID.x;
+
+  float v = -3.402823e38; // -FLT_MAX
+  uint  i = 0u;
+  if (gid < pc.n) {
+    v = x[gid];
+    i = gid;
+  }
+  sh_val[lid] = v;
+  sh_idx[lid] = i;
+  barrier();
+
+  for (uint stride = 128; stride > 0; stride >>= 1) {
+    if (lid < stride) {
+      float v0 = sh_val[lid];
+      float v1 = sh_val[lid + stride];
+      uint  i0 = sh_idx[lid];
+      uint  i1 = sh_idx[lid + stride];
+      bool take1 = (v1 > v0) || (v1 == v0 && i1 < i0);
+      if (take1) { sh_val[lid] = v1; sh_idx[lid] = i1; }
+    }
+    barrier();
+  }
+
+  if (lid == 0) partials[gl_WorkGroupID.x] = uvec2(sh_idx[0], floatBitsToUint(sh_val[0]));
+}

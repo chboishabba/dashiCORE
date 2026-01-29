@@ -19,7 +19,7 @@
 #ifndef VKFFT_BACKEND
 #define VKFFT_BACKEND 0  // Vulkan
 #endif
-#include "vkFFT.h"
+#include "vkFFT/vkFFT.h"
 
 namespace py = pybind11;
 

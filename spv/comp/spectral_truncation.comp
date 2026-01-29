@@ -1,0 +1,37 @@
+#version 450
+layout(local_size_x = 256) in;
+
+/* complex spectrum */
+layout(set = 0, binding = 0) buffer OmegaHat {
+    vec2 omega_hat[];
+};
+
+/* flattened kx, ky */
+layout(set = 0, binding = 1) readonly buffer KX {
+    float kx[];
+};
+layout(set = 0, binding = 2) readonly buffer KY {
+    float ky[];
+};
+
+/* parameters */
+layout(push_constant) uniform Params {
+    float k_max;   // usually max(|kx|,|ky|)
+    float alpha;   // e.g. 36.0
+    float power;   // e.g. 8.0
+    uint  n;       // total number of elements
+} params;
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= params.n) return;
+
+    float k = length(vec2(kx[i], ky[i])) / params.k_max;
+    if (k >= 1.0) {
+        omega_hat[i] = vec2(0.0);
+        return;
+    }
+
+    float filt = exp(-params.alpha * pow(k, params.power));
+    omega_hat[i] *= filt;
+}

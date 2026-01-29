@@ -1,0 +1,31 @@
+#version 450
+layout(local_size_x = 256) in;
+
+layout(std430, set=0, binding=0) readonly buffer SM { uint support_words[]; };
+layout(std430, set=0, binding=1) readonly buffer SG { uint sign_words[]; };
+layout(std430, set=0, binding=2) readonly buffer Q  { int q[]; };
+layout(std430, set=0, binding=3) writeonly buffer XH { float x_hat[]; };
+
+layout(push_constant) uniform PC {
+    uint n;
+    float scale;
+} pc;
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= pc.n) return;
+
+    uint word = i >> 5;
+    uint bit  = i & 31;
+    uint mask = 1u << bit;
+
+    bool sup = (support_words[word] & mask) != 0u;
+    if (!sup) {
+        x_hat[i] = 0.0;
+        return;
+    }
+
+    bool neg = (sign_words[word] & mask) != 0u;
+    float sgn = neg ? -1.0 : 1.0;
+    x_hat[i] = sgn * (float(q[i]) * pc.scale);
+}
