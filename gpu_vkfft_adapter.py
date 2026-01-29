@@ -13,7 +13,7 @@ from __future__ import annotations
 import warnings
 from dataclasses import dataclass
 from multiprocessing import Process, Queue
-from typing import Dict, Iterable, Optional, Tuple, Any
+from typing import Any, Dict, Iterable, Optional, Tuple
 
 import numpy as np
 
@@ -123,6 +123,7 @@ class VkFFTExecutor:
         *,
         handles: Optional[VulkanHandles] = None,
         fft_backend: str = "numpy",
+        timing_enabled: bool = True,
     ):
         """
         Args:
@@ -131,9 +132,13 @@ class VkFFTExecutor:
         """
         self.handles = handles
         self.fft_backend = self._normalize_backend(fft_backend)
+        self.timing_enabled = bool(timing_enabled)
         self._plans: Dict[_PlanKey, _PlanCtx] = {}
         self._command_pool = None
         self._warned = False
+        self._timing_last: Dict[str, float] = {
+            "vkfft_gpu_time_ms": 0.0,
+        }
 
     def _normalize_backend(self, backend: str) -> str:
         allowed = {"numpy", "vkfft", "vkfft-opencl", "vkfft-vulkan"}
@@ -164,6 +169,9 @@ class VkFFTExecutor:
                 self._command_pool = None
         self._plans.clear()
 
+    def get_last_timings(self) -> Dict[str, float]:
+        return dict(self._timing_last) if self.timing_enabled else {}
+
     # ----------------------------- internal helpers -----------------------------
     def _warn_once(self, msg: str) -> None:
         if not self._warned:
@@ -178,6 +186,13 @@ class VkFFTExecutor:
         if not np.iscomplexobj(arr) or arr.dtype not in (np.complex64,):
             return arr.astype(np.complex64, copy=True)
         return arr
+
+    def _timing_reset(self) -> None:
+        if not self.timing_enabled:
+            return
+        self._timing_last = {
+            "vkfft_gpu_time_ms": 0.0,
+        }
 
     def _as_u64(self, obj: Any) -> int:
         """Best-effort conversion of Vulkan cffi handles to integer addresses."""
@@ -437,7 +452,14 @@ class VkFFTExecutor:
 
     def _run_vkfft(self, plan: _PlanCtx, *, inverse: bool) -> None:
         app = plan.app
+        self._timing_reset()
         if hasattr(app, "exec"):
+            if hasattr(app, "exec_timed") and self.timing_enabled:
+                try:
+                    self._timing_last["vkfft_gpu_time_ms"] = float(app.exec_timed())
+                    return
+                except Exception:
+                    self._timing_last["vkfft_gpu_time_ms"] = 0.0
             app.exec()
             return
         # Handle different binding styles:

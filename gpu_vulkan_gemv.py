@@ -68,24 +68,112 @@ class VulkanGemvExecutor:
         self.queue = self.handles.queue
         self.mem_props = self.handles.mem_props
         self.queue_family_index = self.handles.queue_family_index
+        self._timestamp_supported = False
+        self._timestamp_period = 0.0
+        self._timestamp_mask: Optional[int] = None
 
         self._build_pipeline()
         self._allocate_buffers()
         self._timing_last = {
+            "gpu_time_ms": 0.0,
             "gpu_wait_ms": 0.0,
             "fence_wait_ms": 0.0,
         }
+        self._init_timestamp_support()
 
     def _timing_reset(self) -> None:
         if not self.timing_enabled:
             return
         self._timing_last = {
+            "gpu_time_ms": 0.0,
             "gpu_wait_ms": 0.0,
             "fence_wait_ms": 0.0,
         }
 
     def get_last_timings(self) -> dict:
         return dict(self._timing_last) if self.timing_enabled else {}
+
+    def _init_timestamp_support(self) -> None:
+        if not self.timing_enabled:
+            return
+        try:
+            props = vk.vkGetPhysicalDeviceProperties(self.handles.physical_device)
+            self._timestamp_period = float(props.limits.timestampPeriod or 0.0)
+            qprops = vk.vkGetPhysicalDeviceQueueFamilyProperties(self.handles.physical_device)
+            valid_bits = int(qprops[self.handles.queue_family_index].timestampValidBits)
+            if self._timestamp_period > 0.0 and valid_bits > 0:
+                self._timestamp_supported = True
+                if valid_bits < 64:
+                    self._timestamp_mask = (1 << valid_bits) - 1
+        except Exception:
+            self._timestamp_supported = False
+            self._timestamp_period = 0.0
+            self._timestamp_mask = None
+
+    def _create_timestamp_query_pool(self):
+        if not (self.timing_enabled and self._timestamp_supported):
+            return None
+        info = vk.VkQueryPoolCreateInfo(
+            sType=vk.VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
+            queryType=vk.VK_QUERY_TYPE_TIMESTAMP,
+            queryCount=2,
+        )
+        return vk.vkCreateQueryPool(self.device, info, None)
+
+    def _cmd_write_timestamps_begin(self, cmd, query_pool) -> None:
+        if query_pool is None:
+            return
+        if hasattr(vk, "vkCmdResetQueryPool"):
+            vk.vkCmdResetQueryPool(cmd, query_pool, 0, 2)
+        vk.vkCmdWriteTimestamp(cmd, vk.VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, query_pool, 0)
+
+    def _cmd_write_timestamps_end(self, cmd, query_pool) -> None:
+        if query_pool is None:
+            return
+        vk.vkCmdWriteTimestamp(cmd, vk.VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, query_pool, 1)
+
+    def _read_timestamp_ms(self, query_pool) -> float:
+        if query_pool is None or not self._timestamp_supported:
+            return 0.0
+        data_size = 16
+        stride = 8
+        flags = vk.VK_QUERY_RESULT_64_BIT | vk.VK_QUERY_RESULT_WAIT_BIT
+        if hasattr(vk, "ffi"):
+            data = vk.ffi.new("uint64_t[]", 2)
+            vk.vkGetQueryPoolResults(
+                self.device,
+                query_pool,
+                0,
+                2,
+                data_size,
+                data,
+                stride,
+                flags,
+            )
+            t0, t1 = int(data[0]), int(data[1])
+        else:
+            import ctypes
+
+            data = (ctypes.c_uint64 * 2)()
+            vk.vkGetQueryPoolResults(
+                self.device,
+                query_pool,
+                0,
+                2,
+                data_size,
+                data,
+                stride,
+                flags,
+            )
+            t0, t1 = int(data[0]), int(data[1])
+        if self._timestamp_mask is not None:
+            mask = self._timestamp_mask
+            t0 &= mask
+            t1 &= mask
+            delta = (t1 - t0) & mask
+        else:
+            delta = t1 - t0
+        return (delta * self._timestamp_period) / 1.0e6
 
     def _build_pipeline(self) -> None:
         device = self.device
@@ -250,11 +338,13 @@ class VulkanGemvExecutor:
         _write_buffer(self.device, self.mem_A, A32)
         _write_buffer(self.device, self.mem_x, x32)
 
+        query_pool = self._create_timestamp_query_pool()
         begin_info = vk.VkCommandBufferBeginInfo(
             sType=vk.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
             flags=vk.VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
         )
         vk.vkBeginCommandBuffer(self.command_buffer, begin_info)
+        self._cmd_write_timestamps_begin(self.command_buffer, query_pool)
         vk.vkCmdBindPipeline(self.command_buffer, vk.VK_PIPELINE_BIND_POINT_COMPUTE, self.pipeline)
         vk.vkCmdBindDescriptorSets(
             self.command_buffer,
@@ -280,6 +370,7 @@ class VulkanGemvExecutor:
         )
         groups = math.ceil(self.N / self.workgroup_size)
         vk.vkCmdDispatch(self.command_buffer, groups, 1, 1)
+        self._cmd_write_timestamps_end(self.command_buffer, query_pool)
         vk.vkEndCommandBuffer(self.command_buffer)
 
         submit_info = vk.VkSubmitInfo(
@@ -296,6 +387,10 @@ class VulkanGemvExecutor:
             self._timing_last["fence_wait_ms"] += wait_ms
             self._timing_last["gpu_wait_ms"] += wait_ms
         vk.vkDestroyFence(self.device, fence, None)
+        if query_pool is not None:
+            if self.timing_enabled:
+                self._timing_last["gpu_time_ms"] += self._read_timestamp_ms(query_pool)
+            vk.vkDestroyQueryPool(self.device, query_pool, None)
 
         y = _read_buffer(self.device, self.mem_y, (self.N,), np.float32)
         vk.vkResetCommandBuffer(self.command_buffer, 0)

@@ -159,6 +159,103 @@ struct PyVkFFTPlan {
 
         vkFreeCommandBuffers(device, command_pool, 1, &cmd);
     }
+
+    double exec_timed() {
+        VkCommandBufferAllocateInfo ai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+        ai.commandPool = command_pool;
+        ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        ai.commandBufferCount = 1;
+
+        VkCommandBuffer cmd{};
+        if (vkAllocateCommandBuffers(device, &ai, &cmd) != VK_SUCCESS) {
+            throw std::runtime_error("vkAllocateCommandBuffers failed");
+        }
+
+        VkQueryPoolCreateInfo qp{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
+        qp.queryType = VK_QUERY_TYPE_TIMESTAMP;
+        qp.queryCount = 2;
+        VkQueryPool query_pool{};
+        if (vkCreateQueryPool(device, &qp, nullptr, &query_pool) != VK_SUCCESS) {
+            vkFreeCommandBuffers(device, command_pool, 1, &cmd);
+            throw std::runtime_error("vkCreateQueryPool failed");
+        }
+
+        VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+        bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        if (vkBeginCommandBuffer(cmd, &bi) != VK_SUCCESS) {
+            vkDestroyQueryPool(device, query_pool, nullptr);
+            vkFreeCommandBuffers(device, command_pool, 1, &cmd);
+            throw std::runtime_error("vkBeginCommandBuffer failed");
+        }
+
+        vkCmdResetQueryPool(cmd, query_pool, 0, 2);
+        vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, query_pool, 0);
+
+        launch.commandBuffer = &cmd;
+        vkfft_check(VkFFTAppend(&app, inverse_flag, &launch), "VkFFTAppend");
+
+        vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, query_pool, 1);
+        if (vkEndCommandBuffer(cmd) != VK_SUCCESS) {
+            vkDestroyQueryPool(device, query_pool, nullptr);
+            vkFreeCommandBuffers(device, command_pool, 1, &cmd);
+            throw std::runtime_error("vkEndCommandBuffer failed");
+        }
+
+        VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+        si.commandBufferCount = 1;
+        si.pCommandBuffers = &cmd;
+
+        vkResetFences(device, 1, &fence);
+        if (vkQueueSubmit(queue, 1, &si, fence) != VK_SUCCESS) {
+            vkDestroyQueryPool(device, query_pool, nullptr);
+            vkFreeCommandBuffers(device, command_pool, 1, &cmd);
+            throw std::runtime_error("vkQueueSubmit failed");
+        }
+
+        vkWaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX);
+
+        uint64_t ts[2] = {0, 0};
+        VkResult qr = vkGetQueryPoolResults(
+            device,
+            query_pool,
+            0,
+            2,
+            sizeof(ts),
+            ts,
+            sizeof(uint64_t),
+            VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
+        vkDestroyQueryPool(device, query_pool, nullptr);
+        vkFreeCommandBuffers(device, command_pool, 1, &cmd);
+        if (qr != VK_SUCCESS) {
+            return 0.0;
+        }
+
+        VkPhysicalDeviceProperties props{};
+        vkGetPhysicalDeviceProperties(physical_device, &props);
+        double period = static_cast<double>(props.limits.timestampPeriod);
+        if (period <= 0.0) {
+            return 0.0;
+        }
+
+        uint32_t count = 0;
+        vkGetPhysicalDeviceQueueFamilyProperties(physical_device, &count, nullptr);
+        std::vector<VkQueueFamilyProperties> qprops(count);
+        vkGetPhysicalDeviceQueueFamilyProperties(physical_device, &count, qprops.data());
+        uint32_t valid_bits = 0;
+        if (queue_family_index < count) {
+            valid_bits = qprops[queue_family_index].timestampValidBits;
+        }
+        uint64_t mask = valid_bits > 0 && valid_bits < 64 ? ((1ULL << valid_bits) - 1ULL) : 0ULL;
+        uint64_t t0 = ts[0];
+        uint64_t t1 = ts[1];
+        uint64_t delta = 0;
+        if (mask) {
+            delta = (t1 - t0) & mask;
+        } else if (t1 >= t0) {
+            delta = t1 - t0;
+        }
+        return (delta * period) / 1e6;
+    }
 };
 
 PYBIND11_MODULE(vkfft_vulkan_py, m) {
@@ -198,5 +295,6 @@ PYBIND11_MODULE(vkfft_vulkan_py, m) {
         py::arg("buffer"),
         py::arg("scratch_buffer") = py::none(),
         py::arg("inverse") = false)
-        .def("exec", &PyVkFFTPlan::exec);
+        .def("exec", &PyVkFFTPlan::exec)
+        .def("exec_timed", &PyVkFFTPlan::exec_timed);
 }
