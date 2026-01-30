@@ -16,7 +16,14 @@ def _vkfft_include_dirs() -> List[str]:
     """Resolve VkFFT include path from env or common locations."""
     env = os.environ.get("VKFFT_INCLUDE_DIR")
     if env:
-        return [env] # Modified to avoid nested path ambiguity
+        env_path = Path(env)
+        # Normalize env to the parent that contains the "vkFFT" folder.
+        if env_path.name == "vkFFT" and env_path.joinpath("vkFFT.h").exists():
+            return [str(env_path.parent), str(env_path)]
+        if env_path.joinpath("vkFFT.h").exists():
+            return [str(env_path), str(env_path / "vkFFT")]
+        if env_path.joinpath("vkFFT/vkFFT.h").exists():
+            return [str(env_path), str(env_path / "vkFFT")]
     candidates = [
         Path("third_party/VkFFT"),
         Path("VkFFT"),
@@ -27,12 +34,12 @@ def _vkfft_include_dirs() -> List[str]:
         if base.joinpath("vkFFT/vkFFT.h").exists():
             # vkFFT headers expect an include root that already contains the
             # "vkFFT" folder (they reference "vkFFT/..." from deep subdirs).
-            # Adding both keeps compatibility with alternate layouts.
-            includes.append(str(base / "vkFFT"))
             includes.append(str(base))
+            includes.append(str(base / "vkFFT"))
         # Fallback if the header is directly in the base
         elif base.joinpath("vkFFT.h").exists():
             includes.append(str(base))
+            includes.append(str(base / "vkFFT"))
 
     return includes
 
