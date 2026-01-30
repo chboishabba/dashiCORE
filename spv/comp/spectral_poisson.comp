@@ -24,7 +24,7 @@ void main() {
     }
     float k2 = k2_buf.data[idx];
     if (k2 > 0.0) {
-        psi_hat.data[idx] = -omega_hat.data[idx] / k2;
+        psi_hat.data[idx] = omega_hat.data[idx] / k2;
     } else {
         psi_hat.data[idx] = vec2(0.0);
     }
