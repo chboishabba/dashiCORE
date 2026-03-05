@@ -1,1 +1,3 @@
 VkFFT/
+__pycache__/
+*.pyc
